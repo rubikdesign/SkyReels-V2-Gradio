@@ -715,3 +715,92 @@ We would like to thank the contributors of <a href="https://github.com/Wan-Video
       url={https://arxiv.org/abs/2504.13074}, 
 }
 ```
+# SkyReels-V2 Model Downloader
+
+A utility script to download SkyReels-V2 models from Hugging Face and ModelScope repositories.
+
+## Available Models
+
+### Hugging Face
+- Skywork/SkyReels-V2-T2V-14B-540P
+- Skywork/SkyReels-V2-I2V-14B-540P
+- Skywork/SkyReels-V2-I2V-14B-720P
+
+### ModelScope
+- Skywork/SkyReels-V2-DF-1.3B-540P
+- Skywork/SkyReels-V2-DF-14B-540P
+
+## Requirements
+
+- Python 3.6+
+- Internet connection
+- Sufficient disk space for large models (14B models are several GB each)
+
+## Installation
+
+The script automatically installs required dependencies:
+- `huggingface_hub`
+- `modelscope`
+
+## Usage
+
+### Basic Usage
+
+Download all models from both Hugging Face and ModelScope:
+
+```bash
+python download_models.py
+```
+
+### Download from a Specific Source
+
+Download only from Hugging Face:
+
+```bash
+python download_models.py --source huggingface
+```
+
+Download only from ModelScope:
+
+```bash
+python download_models.py --source modelscope
+```
+
+### Download a Specific Model
+
+Download a specific model by providing a part of its name:
+
+```bash
+python download_models.py --model I2V-14B-720P
+```
+
+### Speed up Downloads with Parallel Processing
+
+Download multiple models simultaneously:
+
+```bash
+python download_models.py --parallel
+```
+
+### Resume Interrupted Downloads
+
+By default, the script will resume interrupted downloads. You can explicitly set this option:
+
+```bash
+python download_models.py --resume
+```
+
+## Output Structure
+
+- Hugging Face models are downloaded to their respective folders in `./models/`
+- ModelScope models are downloaded to the ModelScope cache location and need to be moved manually to the appropriate directory
+
+## Notes
+
+- These models are large and may take considerable time to download depending on your internet connection
+- Ensure you have sufficient disk space before starting the download
+- For best results, use a stable internet connection
+
+## License
+
+The models are provided by Skywork AI. Please refer to the model documentation for license information.
