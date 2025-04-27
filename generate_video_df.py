@@ -210,18 +210,21 @@ if __name__ == "__main__":
     logger.info(f"Starting video generation with {num_frames} frames...")
     generation_start = time.time()
     
-    # Define callback function for progress reporting
-    def callback_fn(step, timestep, latents):
-        percent_complete = step / args.inference_steps * 100
-        logger.info(f"Generation progress: Step {step}/{args.inference_steps} ({percent_complete:.1f}%)")
-        return None
+    # REMOVED: callback function that was causing issues in the previous script
+    # def callback_fn(step, timestep, latents):
+    #     percent_complete = step / args.inference_steps * 100
+    #     logger.info(f"Generation progress: Step {step}/{args.inference_steps} ({percent_complete:.1f}%)")
+    #     return None
     
     with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
         # Asynchronous inference (ar_step > 0) will have multiple stages of generation
         if args.ar_step > 0:
             logger.info(f"Using asynchronous generation with ar_step={args.ar_step}, causal_block_size={args.causal_block_size}")
+            logger.info("Asynchronous generation may take significantly longer than synchronous mode")
+        else:
+            logger.info("Using synchronous generation mode")
         
-        # Build generation parameters
+        # Build generation parameters without callback
         generation_params = {
             "prompt": prompt_input,
             "negative_prompt": negative_prompt,
@@ -239,12 +242,40 @@ if __name__ == "__main__":
             "ar_step": args.ar_step,
             "causal_block_size": args.causal_block_size,
             "fps": fps,
-            "callback": callback_fn,
-            "callback_steps": max(args.inference_steps // 10, 1)
+            # REMOVED: callback parameters
+            # "callback": callback_fn,
+            # "callback_steps": max(args.inference_steps // 10, 1)
         }
         
-        logger.info("Starting generation process...")
-        video_frames = pipe(**generation_params)[0]
+        logger.info("Starting generation process... This may take several minutes.")
+        
+        # Check if DiffusionForcingPipeline supports callbacks
+        import inspect
+        if 'callback' in inspect.signature(pipe.__call__).parameters:
+            logger.info("Pipeline supports callbacks, enabling progress reporting")
+            def callback_fn(step, timestep, latents):
+                percent_complete = step / args.inference_steps * 100
+                logger.info(f"Generation progress: Step {step}/{args.inference_steps} ({percent_complete:.1f}%)")
+                return None
+            
+            generation_params["callback"] = callback_fn
+            generation_params["callback_steps"] = max(args.inference_steps // 10, 1)
+        else:
+            logger.info("Pipeline doesn't support callbacks, progress updates will not be shown")
+        
+        try:
+            video_frames = pipe(**generation_params)[0]
+        except TypeError as e:
+            if "got an unexpected keyword argument 'callback'" in str(e):
+                logger.info("Callback not supported, retrying without callback parameters")
+                # Remove callback parameters if they exist
+                if "callback" in generation_params:
+                    del generation_params["callback"]
+                if "callback_steps" in generation_params:
+                    del generation_params["callback_steps"]
+                video_frames = pipe(**generation_params)[0]
+            else:
+                raise
     
     generation_time = time.time() - generation_start
     logger.info(f"Video generation completed in {generation_time:.2f} seconds")
