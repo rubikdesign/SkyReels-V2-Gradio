@@ -8,36 +8,36 @@ import time
 import threading
 from PIL import Image
 
-# Verifică dacă Gradio este instalat și instalează-l dacă nu este
+# Check if Gradio is installed and install it if not
 try:
     import gradio
 except ImportError:
-    print("Instalare Gradio...")
+    print("Installing Gradio...")
     subprocess.run(["pip", "install", "gradio"], check=True)
     import gradio as gr
 
-# Verifică dacă Diffusers este instalat și instalează-l dacă nu este
+# Check if Diffusers is installed and install it if not
 try:
     import diffusers
 except ImportError:
-    print("Instalare Diffusers...")
+    print("Installing Diffusers...")
     subprocess.run(["pip", "install", "diffusers"], check=True)
     import diffusers
     
-# Configurați directoarele de ieșire
+# Configure output directories
 VIDEO_OUTPUT_DIR = "./result/video_out"
 IMAGE_OUTPUT_DIR = "./image_out"
 
 os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
 os.makedirs(IMAGE_OUTPUT_DIR, exist_ok=True)
 
-# Funcția pentru text-to-image
+# Function for text-to-image
 def text_to_image(prompt, num_inference_steps=50, guidance_scale=7.5, seed=None):
     if seed:
         torch.manual_seed(seed)
         np.random.seed(seed)
     
-    # Folosim diffusers pentru text-to-image
+    # Use diffusers for text-to-image
     pipe = diffusers.StableDiffusionPipeline.from_pretrained(
         "stabilityai/stable-diffusion-2-1", torch_dtype=torch.float16
     )
@@ -45,32 +45,32 @@ def text_to_image(prompt, num_inference_steps=50, guidance_scale=7.5, seed=None)
     
     image = pipe(prompt, num_inference_steps=num_inference_steps, guidance_scale=guidance_scale).images[0]
     
-    # Salvează imaginea
+    # Save the image
     image_path = os.path.join(IMAGE_OUTPUT_DIR, f"generated_image_{hash(prompt)}.png")
     image.save(image_path)
     
     return image, image_path
 
-# Funcția pentru image-to-video
+# Function for image-to-video
 def image_to_video(image, prompt, resolution="720P", num_frames=121, guidance_scale=5.0, 
                    shift=3.0, fps=24, seed=None, offload=True, teacache=True, 
                    use_ret_steps=True, teacache_thresh=0.3):
     
-    # Afișăm în consolă progresul
-    current_status = "Inițializare proces de generare video..."
+    # Display progress in console
+    current_status = "Initializing video generation process..."
     print(current_status)
     
-    # Salvează imaginea temporar
+    # Save the image temporarily
     temp_image_path = os.path.join(IMAGE_OUTPUT_DIR, "temp_input.jpg")
     if isinstance(image, np.ndarray):
         Image.fromarray(image).save(temp_image_path)
     else:
         image.save(temp_image_path)
     
-    current_status = "Imagine salvată temporar. Pregătire pentru generare video..."
+    current_status = "Image saved temporarily. Preparing for video generation..."
     print(current_status)
     
-    # Construiește comanda pentru generate_video.py
+    # Build command for generate_video.py
     cmd = [
         "python3", "generate_video.py",
         "--model_id", "./models/SkyReels-V2-I2V-14B-720P",
@@ -81,7 +81,7 @@ def image_to_video(image, prompt, resolution="720P", num_frames=121, guidance_sc
         "--fps", str(fps),
         "--image", temp_image_path,
         "--prompt", prompt,
-        "--outdir", "video_out"  # Asigură-te că directorul de ieșire este corect
+        "--outdir", "video_out"  # Make sure the output directory is correct
     ]
     
     if seed is not None and seed != 0:
@@ -99,10 +99,10 @@ def image_to_video(image, prompt, resolution="720P", num_frames=121, guidance_sc
     if teacache_thresh:
         cmd.extend(["--teacache_thresh", str(teacache_thresh)])
     
-    current_status = f"Pornire proces cu comanda:\n{' '.join(cmd)}"
+    current_status = f"Starting process with command:\n{' '.join(cmd)}"
     print(current_status)
     
-    # Execută comanda cu pipe-uri pentru stdout și stderr
+    # Execute command with pipes for stdout and stderr
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -112,90 +112,90 @@ def image_to_video(image, prompt, resolution="720P", num_frames=121, guidance_sc
         text=True
     )
     
-    # Citim outputul în timp real
+    # Read output in real time
     logs = []
     
-    # Citește și actualizează outputul în timp real
+    # Read and update output in real time
     for line in iter(process.stdout.readline, ''):
         if line.strip():
             logs.append(line.strip())
             print(line.strip())
     
-    # Procesul s-a terminat, verificăm codul de ieșire
+    # Process has finished, check exit code
     process.wait()
     
     if process.returncode != 0:
-        # Citim și eventualele erori
+        # Read any errors
         stderr = process.stderr.read()
-        error_msg = f"Eroare în timpul generării. Cod de ieșire: {process.returncode}\n{stderr}"
+        error_msg = f"Error during generation. Exit code: {process.returncode}\n{stderr}"
         print(error_msg)
         return None, error_msg
     
-    current_status = "\nGenerare completă. Căutare fișier video..."
+    current_status = "\nGeneration complete. Searching for video file..."
     print(current_status)
     
-    # Găsește ultima înregistrare video creată din directorul VIDEO_OUTPUT_DIR
+    # Find the last video recording created in the VIDEO_OUTPUT_DIR directory
     video_files = [os.path.join(VIDEO_OUTPUT_DIR, f) for f in os.listdir(VIDEO_OUTPUT_DIR) 
                   if f.endswith('.mp4')]
     
     if not video_files:
-        error_msg = "Nu s-a găsit niciun fișier video generat."
+        error_msg = "No generated video file was found."
         print(error_msg)
         return None, error_msg
     
     video_path = max(video_files, key=os.path.getctime)
-    success_msg = f"Video generat cu succes la: {video_path}"
+    success_msg = f"Video successfully generated at: {video_path}"
     print(success_msg)
     
     return video_path, success_msg
 
-# Interfața Gradio
+# Gradio Interface
 def create_interface():
     with gr.Blocks(title="SkyReels-V2 Demo") as demo:
         gr.Markdown("# SkyReels-V2 Demo Generator")
-        gr.Markdown("Generați videoclipuri din imagini sau text folosind modelele SkyReels-V2")
+        gr.Markdown("Generate videos from images or text using SkyReels-V2 models")
         
         with gr.Tab("Text to Image"):
             with gr.Row():
                 with gr.Column():
-                    t2i_prompt = gr.Textbox(label="Descrieți imaginea dorită", lines=3)
-                    t2i_steps = gr.Slider(minimum=20, maximum=100, value=50, step=1, label="Pași de inferență")
+                    t2i_prompt = gr.Textbox(label="Describe the desired image", lines=3)
+                    t2i_steps = gr.Slider(minimum=20, maximum=100, value=50, step=1, label="Inference Steps")
                     t2i_guidance = gr.Slider(minimum=1, maximum=15, value=7.5, step=0.1, label="Guidance Scale")
-                    t2i_seed = gr.Number(label="Seed (opțional)", precision=0)
-                    t2i_button = gr.Button("Generează Imaginea")
+                    t2i_seed = gr.Number(label="Seed (optional)", precision=0)
+                    t2i_button = gr.Button("Generate Image")
                 
                 with gr.Column():
-                    t2i_output = gr.Image(label="Imagine Generată")
-                    t2i_path = gr.Textbox(label="Calea către imaginea generată")
+                    t2i_output = gr.Image(label="Generated Image")
+                    t2i_path = gr.Textbox(label="Path to the generated image")
         
         with gr.Tab("Image to Video"):
             with gr.Row():
                 with gr.Column(scale=2):
-                    i2v_image = gr.Image(label="Încărcați o imagine sau generați una din tab-ul Text to Image", type="pil")
-                    i2v_prompt = gr.Textbox(label="Descrieți video-ul dorit", lines=3)
+                    i2v_image = gr.Image(label="Upload an image or generate one from the Text to Image tab", type="pil")
+                    i2v_prompt = gr.Textbox(label="Describe the desired video", lines=3)
                     
                     with gr.Row():
                         with gr.Column():
-                            i2v_resolution = gr.Dropdown(choices=["540P", "720P"], value="720P", label="Rezoluție")
-                            i2v_frames = gr.Slider(minimum=97, maximum=257, value=121, step=1, label="Număr de cadre")
+                            i2v_resolution = gr.Dropdown(choices=["540P", "720P"], value="720P", label="Resolution")
+                            i2v_frames = gr.Slider(minimum=97, maximum=257, value=121, step=1, label="Number of Frames")
                             i2v_guidance = gr.Slider(minimum=1, maximum=10, value=5.0, step=0.1, label="Guidance Scale")
                             i2v_shift = gr.Slider(minimum=1, maximum=10, value=3.0, step=0.1, label="Shift")
                             i2v_fps = gr.Slider(minimum=15, maximum=60, value=24, step=1, label="FPS")
-                            i2v_seed = gr.Number(label="Seed (opțional)", precision=0)
+                            i2v_seed = gr.Number(label="Seed (optional)", precision=0)
                         
                         with gr.Column():
                             i2v_offload = gr.Checkbox(value=True, label="Offload")
-                            i2v_teacache = gr.Checkbox(value=True, label="Folosește Teacache")
-                            i2v_use_ret_steps = gr.Checkbox(value=True, label="Folosește Retention Steps")
+                            i2v_teacache = gr.Checkbox(value=True, label="Use Teacache")
+                            i2v_use_ret_steps = gr.Checkbox(value=True, label="Use Retention Steps")
                             i2v_teacache_thresh = gr.Slider(minimum=0.1, maximum=1.0, value=0.3, step=0.1, label="Teacache Threshold")
                     
-                    i2v_button = gr.Button("Generează Video", variant="primary")
+                    i2v_button = gr.Button("Generate Video", variant="primary")
                 
                 with gr.Column(scale=2):
-                    i2v_output = gr.Video(label="Video Generat")
-                    i2v_message = gr.Textbox(label="Mesaj Status")
+                    i2v_output = gr.Video(label="Generated Video")
+                    i2v_message = gr.Textbox(label="Status Message")
         
-        # Conectați butoanele la funcții
+        # Connect buttons to functions
         t2i_button.click(
             text_to_image, 
             inputs=[t2i_prompt, t2i_steps, t2i_guidance, t2i_seed],
@@ -216,7 +216,7 @@ def create_interface():
     return demo
 
 if __name__ == "__main__":
-    # Creează și lansează interfața
+    # Create and launch the interface
     interface = create_interface()
-    interface.queue()  # Activează sistemul de coadă Gradio
+    interface.queue()  # Activate the Gradio queue system
     interface.launch(share=True, debug=True)
