@@ -15,7 +15,7 @@ from skyreels_v2_infer.pipelines import PromptEnhancer
 from skyreels_v2_infer.pipelines import resizecrop
 from skyreels_v2_infer.pipelines import Text2VideoPipeline
 
-# Configure logging
+# Configurează logarea
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(levelname)s - %(message)s',
                    datefmt='%H:%M:%S')
@@ -35,7 +35,7 @@ MODEL_ID_CONFIG = {
 
 
 if __name__ == "__main__":
-    logger.info("SkyReels-V2 Video Generator - Starting")
+    logger.info("SkyReels-V2 Video Generator - Pornire")
     start_time = time.time()
 
     parser = argparse.ArgumentParser()
@@ -69,21 +69,21 @@ if __name__ == "__main__":
         help="Using Retention Steps will result in faster generation speed and better generation quality.")
     args = parser.parse_args()
     
-    logger.info(f"Configuration: Resolution={args.resolution}, Frames={args.num_frames}, Steps={args.inference_steps}")
+    logger.info(f"Configurare: Resolution={args.resolution}, Frames={args.num_frames}, Steps={args.inference_steps}")
     if args.image:
-        logger.info(f"Mode: Image-to-Video with file {args.image}")
+        logger.info(f"Mod: Image-to-Video cu fișierul {args.image}")
     else:
-        logger.info(f"Mode: Text-to-Video")
+        logger.info(f"Mod: Text-to-Video")
     
-    logger.info(f"Downloading/verifying model: {args.model_id}")
+    logger.info(f"Descărcare/verificare model: {args.model_id}")
     args.model_id = download_model(args.model_id)
-    logger.info(f"Model loaded: {args.model_id}")
+    logger.info(f"Model încărcat: {args.model_id}")
 
     assert (args.use_usp and args.seed is not None) or (not args.use_usp), "usp mode need seed"
     if args.seed is None:
         random.seed(time.time())
         args.seed = int(random.randrange(4294967294))
-    logger.info(f"Seed used: {args.seed}")
+    logger.info(f"Seed utilizat: {args.seed}")
 
     if args.resolution == "540P":
         height = 544
@@ -94,18 +94,18 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid resolution: {args.resolution}")
     
-    logger.info(f"Video dimensions: {width}x{height}")
+    logger.info(f"Dimensiuni video: {width}x{height}")
 
     image = None
     if args.image:
-        logger.info(f"Loading input image: {args.image}")
+        logger.info(f"Încărcare imagine de intrare: {args.image}")
         image = load_image(args.image).convert("RGB")
-        logger.info("Image loaded successfully")
+        logger.info("Imagine încărcată cu succes")
 
     negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
     local_rank = 0
     if args.use_usp:
-        logger.info("Initializing USP mode for multi-GPU processing")
+        logger.info("Inițializare mod USP pentru procesare multi-GPU")
         assert not args.prompt_enhancer, "`--prompt_enhancer` is not allowed if using `--use_usp`. We recommend running the skyreels_v2_infer/pipelines/prompt_enhancer.py script first to generate enhanced prompt before enabling the `--use_usp` parameter."
         from xfuser.core.distributed import initialize_model_parallel, init_distributed_environment
         import torch.distributed as dist
@@ -122,53 +122,53 @@ if __name__ == "__main__":
             ring_degree=1,
             ulysses_degree=dist.get_world_size(),
         )
-        logger.info(f"USP initialized with rank {local_rank}, world_size {dist.get_world_size()}")
+        logger.info(f"USP inițializat cu rank {local_rank}, world_size {dist.get_world_size()}")
 
     prompt_input = args.prompt
     if args.prompt_enhancer and args.image is None:
-        logger.info("Initializing and applying prompt enhancer...")
+        logger.info("Inițializare și aplicare prompt enhancer...")
         prompt_enhancer = PromptEnhancer()
         prompt_input = prompt_enhancer(prompt_input)
-        logger.info(f"Enhanced prompt: {prompt_input}")
+        logger.info(f"Prompt îmbunătățit: {prompt_input}")
         del prompt_enhancer
         gc.collect()
         torch.cuda.empty_cache()
 
-    # GPU memory before loading the model
+    # Memorie GPU înainte de a încărca modelul
     free_mem, total_mem = torch.cuda.mem_get_info()
-    logger.info(f"VRAM before loading model: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+    logger.info(f"VRAM înainte de încărcarea modelului: {free_mem/1024**3:.2f}GB liber din {total_mem/1024**3:.2f}GB total")
 
     if image is None:
         assert "T2V" in args.model_id, f"check model_id:{args.model_id}"
-        logger.info("Initializing Text-to-Video pipeline...")
+        logger.info("Inițializare pipeline Text-to-Video...")
         pipe = Text2VideoPipeline(
             model_path=args.model_id, dit_path=args.model_id, use_usp=args.use_usp, offload=args.offload
         )
-        logger.info("Text-to-Video pipeline initialized successfully")
+        logger.info("Pipeline Text-to-Video inițializat cu succes")
     else:
         assert "I2V" in args.model_id, f"check model_id:{args.model_id}"
-        logger.info("Initializing Image-to-Video pipeline...")
+        logger.info("Inițializare pipeline Image-to-Video...")
         pipe = Image2VideoPipeline(
             model_path=args.model_id, dit_path=args.model_id, use_usp=args.use_usp, offload=args.offload
         )
-        logger.info("Image-to-Video pipeline initialized successfully")
+        logger.info("Pipeline Image-to-Video inițializat cu succes")
         args.image = load_image(args.image)
         image_width, image_height = args.image.size
         if image_height > image_width:
             height, width = width, height
-        logger.info(f"Resizing image to {width}x{height}")
+        logger.info(f"Redimensionare imagine la {width}x{height}")
         args.image = resizecrop(args.image, height, width)
 
-    # GPU memory after loading the model
+    # Memorie GPU după încărcarea modelului
     free_mem, total_mem = torch.cuda.mem_get_info()
-    logger.info(f"VRAM after loading model: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+    logger.info(f"VRAM după încărcarea modelului: {free_mem/1024**3:.2f}GB liber din {total_mem/1024**3:.2f}GB total")
 
     if args.teacache:
-        logger.info("Initializing TEACache for accelerated inference...")
+        logger.info("Inițializare TEACache pentru inferență accelerată...")
         pipe.transformer.initialize_teacache(enable_teacache=True, num_steps=args.inference_steps, 
                                              teacache_thresh=args.teacache_thresh, use_ret_steps=args.use_ret_steps, 
                                              ckpt_dir=args.model_id)
-        logger.info(f"TEACache initialized with threshold={args.teacache_thresh}, use_ret_steps={args.use_ret_steps}")
+        logger.info(f"TEACache inițializat cu threshold={args.teacache_thresh}, use_ret_steps={args.use_ret_steps}")
         
 
     kwargs = {
@@ -189,36 +189,37 @@ if __name__ == "__main__":
     save_dir = os.path.join("result", args.outdir)
     os.makedirs(save_dir, exist_ok=True)
 
-    logger.info(f"Starting video generation with {args.num_frames} frames...")
+    logger.info(f"Începere generare video cu {args.num_frames} cadre...")
     generation_start = time.time()
+    
     with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
-        logger.info(f"Inference parameters: guidance_scale={args.guidance_scale}, shift={args.shift}, steps={args.inference_steps}")
+        logger.info(f"Parametri inferență: guidance_scale={args.guidance_scale}, shift={args.shift}, steps={args.inference_steps}")
         
-        # Display progress every 10% of the generation process
-        callback_steps = max(args.inference_steps // 10, 1)
+        # Manual logging instead of callback since the callback isn't supported
+        logger.info(f"Generare în curs... Acest proces poate dura câteva minute.")
         
-        def callback_fn(step, timestep, latents):
-            percent_complete = step / args.inference_steps * 100
-            logger.info(f"Generation progress: Step {step}/{args.inference_steps} ({percent_complete:.1f}%)")
-            return None
-        
-        # Add callback for progress reporting
-        kwargs["callback"] = callback_fn
-        kwargs["callback_steps"] = callback_steps
+        # REMOVED: callback parameters that were causing the error
+        # These lines were removed:
+        # def callback_fn(step, timestep, latents):
+        #     percent_complete = step / args.inference_steps * 100
+        #     logger.info(f"Progres generare: Pas {step}/{args.inference_steps} ({percent_complete:.1f}%)")
+        #     return None
+        # kwargs["callback"] = callback_fn
+        # kwargs["callback_steps"] = callback_steps
         
         video_frames = pipe(**kwargs)[0]
     
     generation_time = time.time() - generation_start
-    logger.info(f"Video generation completed in {generation_time:.2f} seconds")
+    logger.info(f"Generare video completă în {generation_time:.2f} secunde")
 
     if local_rank == 0:
-        logger.info("Saving result video...")
+        logger.info("Salvare video rezultat...")
         current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
         video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{current_time}.mp4"
         output_path = os.path.join(save_dir, video_out_file)
         imageio.mimwrite(output_path, video_frames, fps=args.fps, quality=8, output_params=["-loglevel", "error"])
-        logger.info(f"Video saved at: {output_path}")
+        logger.info(f"Video salvat la: {output_path}")
     
     total_time = time.time() - start_time
-    logger.info(f"Complete process took {total_time:.2f} seconds")
-    logger.info(f"Generation statistics: {args.num_frames} frames, {generation_time:.2f} seconds, {args.num_frames/generation_time:.2f} frames/second")
+    logger.info(f"Proces complet în {total_time:.2f} secunde")
+    logger.info(f"Statistici generare: {args.num_frames} cadre, {generation_time:.2f} secunde, {args.num_frames/generation_time:.2f} cadre/secundă")
