@@ -75,15 +75,26 @@ ASPECT_RATIOS = {
 
 def get_available_models():
     """Discover all local models under ./models"""
-    all_dirs = sorted(glob(os.path.join(MODEL_DIR, "SkyReels-V2-*")))
-    model_map = {os.path.basename(p): p for p in all_dirs}
+    # Verifică și directoarele de tipul I2V
+    all_dirs = glob(os.path.join(MODEL_DIR, "SkyReels-V2-*")) + \
+               glob(os.path.join(MODEL_DIR, "*/SkyReels-V2-*"))
     
-    # Split into model types
-    t2v_models = [m for m in model_map if "-T2V-" in m] + [m for m in model_map if "-DF-" in m]
+    model_map = {}
+    for p in all_dirs:
+        base_name = os.path.basename(p)
+        if base_name not in model_map:  # evită duplicatele
+            model_map[base_name] = p
+    
+    # Split into model types - include mai multe pattern-uri pentru siguranță
+    t2v_models = [m for m in model_map if any(x in m for x in ["-T2V-", "-DF-"])]
     i2v_models = [m for m in model_map if "-I2V-" in m]
     
+    # Afișează pentru debugging
+    print(f"Found models: {model_map.keys()}")
+    print(f"T2V models: {t2v_models}")
+    print(f"I2V models: {i2v_models}")
+    
     return model_map, t2v_models, i2v_models
-
 def get_missing_models():
     """Find which models are not downloaded yet"""
     model_map, _, _ = get_available_models()
