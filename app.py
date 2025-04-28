@@ -238,6 +238,10 @@ def build_command(script, model_path, resolution, aspect_ratio, num_frames, fps,
     # Add the width and height parameters directly
     cmd.extend(["--width", str(width), "--height", str(height)])
     
+    # Mapează steps la inference_steps dacă există
+    if "steps" in kwargs:
+        kwargs["inference_steps"] = kwargs.pop("steps")
+    
     for key, value in kwargs.items():
         if key in FLAG_ONLY_ARGS:
             if value:
@@ -286,7 +290,7 @@ def text_to_video_live(
         # core args
         guidance_scale=(None if is_df else guidance_scale),
         shift=(None if is_df else shift),
-        steps=steps,
+        steps=steps,  # Acesta va fi mapat la inference_steps în build_command
         seed=seed,
         # DF-only args
         ar_step=(ar_step if is_df else None),
@@ -334,7 +338,7 @@ def image_to_video_live(
         image=img_path,
         guidance_scale=guidance_scale,
         shift=shift,
-        steps=steps,
+        steps=steps,  # Acesta va fi mapat la inference_steps în build_command
         seed=seed,
         teacache_thresh=teacache_thresh,
         # flags
@@ -510,11 +514,11 @@ def create_interface():
         
         # Show download UI if models are missing
         if missing_models:
-            with gr.Box(elem_classes=["warning-box"]):
+            with gr.Group(elem_classes=["warning-box"]):  # Folosim Group în loc de Box
                 gr.Markdown(f"⚠️ {len(missing_models)} models are not downloaded yet.")
             download_ui = create_download_interface()
         else:
-            with gr.Box(elem_classes=["success-box"]):
+            with gr.Group(elem_classes=["success-box"]):  # Folosim Group în loc de Box
                 gr.Markdown("✅ All models are already downloaded.")
         
         # Main tabs for generation
@@ -581,10 +585,10 @@ def create_interface():
                             )
                         gr.Markdown("*For T2V: Guidance Scale 6.0 and Shift 8.0 recommended*", elem_classes=["info-text"])
                         
-                        # Adăugăm controlul pentru steps
+                        # Adăugăm controlul pentru steps (Inference Steps)
                         t2v_steps = gr.Slider(
                             1, 100, 
-                            label="Steps", 
+                            label="Inference Steps", 
                             value=30,
                             step=1
                         )
@@ -725,10 +729,10 @@ def create_interface():
                             )
                         gr.Markdown("*For I2V: Guidance Scale 5.0 and Shift 3.0 recommended*", elem_classes=["info-text"])
                         
-                        # Adăugăm controlul pentru steps
+                        # Adăugăm controlul pentru steps (mapat la inference_steps)
                         i2v_steps = gr.Slider(
                             1, 100, 
-                            label="Steps", 
+                            label="Inference Steps", 
                             value=30,
                             step=1
                         )
@@ -811,13 +815,13 @@ def create_interface():
                 - **Prompt**: Detailed descriptions work best. Describe subjects, actions, environment, lighting.
                 - **Guidance Scale**: 6.0 recommended for T2V. Higher values follow the prompt more strictly.
                 - **Shift**: 8.0 recommended for T2V.
-                - **Steps**: 30 is a good balance between quality and speed. Increase for better quality.
+                - **Inference Steps**: 30 is a good balance between quality and speed. Increase for better quality.
                 
                 ### Image-to-Video
                 - **Prompt**: Describe how the image should animate.
                 - **Guidance Scale**: 5.0 recommended for I2V.
                 - **Shift**: 3.0 recommended for I2V.
-                - **Steps**: 30 is a good balance between quality and speed. Increase for better quality.
+                - **Inference Steps**: 30 is a good balance between quality and speed. Increase for better quality.
                 
                 ### Diffusion Forcing (DF)
                 - **AR Step**: Set to 0 for synchronous generation, 5 for asynchronous.
