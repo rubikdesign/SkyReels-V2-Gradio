@@ -28,6 +28,8 @@ if __name__ == "__main__":
     parser.add_argument("--outdir", type=str, default="diffusion_forcing")
     parser.add_argument("--model_id", type=str, default="Skywork/SkyReels-V2-DF-1.3B-540P")
     parser.add_argument("--resolution", type=str, choices=["540P", "720P"])
+    parser.add_argument("--width", type=int, default=None, help="Custom width (overrides default for resolution)")
+    parser.add_argument("--height", type=int, default=None, help="Custom height (overrides default for resolution)")
     parser.add_argument("--num_frames", type=int, default=97)
     parser.add_argument("--image", type=str, default=None)
     parser.add_argument("--ar_step", type=int, default=0)
@@ -81,12 +83,13 @@ if __name__ == "__main__":
         args.seed = int(random.randrange(4294967294))
     logger.info(f"Seed used: {args.seed}")
 
+    # Set dimensions based on resolution and custom width/height if provided
     if args.resolution == "540P":
-        height = 544
-        width = 960
+        height = args.height or 544
+        width = args.width or 960
     elif args.resolution == "720P":
-        height = 720
-        width = 1280
+        height = args.height or 720
+        width = args.width or 1280
     else:
         raise ValueError(f"Invalid resolution: {args.resolution}")
     
@@ -113,9 +116,12 @@ if __name__ == "__main__":
         logger.info(f"Loading input image: {args.image}")
         args.image = load_image(args.image)
         image_width, image_height = args.image.size
-        if image_height > image_width:
+        
+        # Only do auto-swap if custom dimensions weren't provided
+        if args.width is None and args.height is None and image_height > image_width:
+            logger.info(f"Portrait image detected, swapping dimensions")
             height, width = width, height
-            logger.info(f"Portrait image detected, swapping dimensions to {width}x{height}")
+            
         logger.info(f"Resizing image to {width}x{height}")
         args.image = resizecrop(args.image, height, width)
         logger.info("Image loaded and processed successfully")
@@ -210,12 +216,6 @@ if __name__ == "__main__":
     logger.info(f"Starting video generation with {num_frames} frames...")
     generation_start = time.time()
     
-    # REMOVED: callback function that was causing issues in the previous script
-    # def callback_fn(step, timestep, latents):
-    #     percent_complete = step / args.inference_steps * 100
-    #     logger.info(f"Generation progress: Step {step}/{args.inference_steps} ({percent_complete:.1f}%)")
-    #     return None
-    
     with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
         # Asynchronous inference (ar_step > 0) will have multiple stages of generation
         if args.ar_step > 0:
@@ -242,9 +242,6 @@ if __name__ == "__main__":
             "ar_step": args.ar_step,
             "causal_block_size": args.causal_block_size,
             "fps": fps,
-            # REMOVED: callback parameters
-            # "callback": callback_fn,
-            # "callback_steps": max(args.inference_steps // 10, 1)
         }
         
         logger.info("Starting generation process... This may take several minutes.")
