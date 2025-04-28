@@ -89,7 +89,7 @@ def get_missing_models():
     model_map, _, _ = get_available_models()
     return [name for name in MODEL_INFO.keys() if name not in model_map]
 
-def download_model_huggingface(model_name, progress=gr.Progress()):
+def download_model_huggingface(model_name, progress=None):
     """Download a model from Hugging Face"""
     try:
         from huggingface_hub import snapshot_download
@@ -100,31 +100,31 @@ def download_model_huggingface(model_name, progress=gr.Progress()):
     repo_id = MODEL_INFO[model_name]["repo_id"]
     local_dir = os.path.join(MODEL_DIR, model_name)
     
-    progress(0.1, f"Downloading {model_name}...")
+    print(f"Downloading {model_name}...")
     os.makedirs(local_dir, exist_ok=True)
     
     try:
         snapshot_download(repo_id=repo_id, local_dir=local_dir, resume_download=True)
-        progress(1.0, f"Successfully downloaded {model_name}")
+        print(f"Successfully downloaded {model_name}")
         return f"✅ Successfully downloaded {model_name}"
     except Exception as e:
         return f"❌ Failed to download {model_name}: {str(e)}"
 
-def download_selected_models(selected_models, progress=gr.Progress()):
+def download_selected_models(selected_models):
     """Download multiple selected models"""
     results = []
     total = len(selected_models)
     
     for i, model in enumerate(selected_models):
-        progress((i/total), f"Downloading {model} ({i+1}/{total})...")
-        result = download_model_huggingface(model, progress)
+        print(f"Downloading {model} ({i+1}/{total})...")
+        result = download_model_huggingface(model)
         results.append(result)
-        progress(((i+1)/total), f"Completed {model} ({i+1}/{total})")
+        print(f"Completed {model} ({i+1}/{total})")
     
     # Refresh the model lists after downloading
     model_map, t2v_models, i2v_models = get_available_models()
     
-    return "\n".join(results), t2v_models, i2v_models
+    return "\n".join(results)
 
 def find_latest_video():
     """Find the latest generated video file."""
@@ -334,12 +334,12 @@ def create_interface():
         .aspect-ratio-selector { max-width: 150px; margin-right: 10px; }
         .info-text { font-size: 0.9em; color: #666; font-style: italic; }
     """) as demo:
-        gr.Markdown("# SkyReels-V2 Video Generator", elem_classes=["header"])
+        gr.Markdown("# SkyReels-V2 Video Generator")
         gr.Markdown("Create videos from text or images using your local SkyReels-V2 models.")
         
         # Show download UI if models are missing
         if missing_models:
-            gr.Markdown(f"⚠️ {len(missing_models)} models are not downloaded yet.", elem_classes=["warning"])
+            gr.Markdown(f"⚠️ {len(missing_models)} models are not downloaded yet.")
             download_ui = create_download_interface()
         
         # Main tabs for generation
@@ -350,10 +350,9 @@ def create_interface():
                         t2v_model = gr.Dropdown(
                             t2v_models, 
                             label="Model", 
-                            value=t2v_models[0] if t2v_models else None,
-                            elem_classes=["model-select"],
-                            info="Select the text-to-video model to use for generation."
+                            value=t2v_models[0] if t2v_models else None
                         )
+                        gr.Markdown("*Select the text-to-video model to use for generation*", elem_classes=["info-text"])
                     else:
                         gr.Markdown("⚠️ No Text-to-Video models available. Please download models first.")
                         t2v_model = gr.Dropdown([], label="Model (no models available)")
@@ -361,96 +360,96 @@ def create_interface():
                     t2v_prompt = gr.Textbox(
                         lines=3, 
                         placeholder="Enter a detailed description of the video you want to generate...", 
-                        label="Prompt",
-                        info="A detailed prompt will lead to better results. Describe the scene, subjects, actions, and atmosphere."
+                        label="Prompt"
                     )
+                    gr.Markdown("*A detailed prompt will lead to better results. Describe the scene, subjects, actions, and atmosphere.*", elem_classes=["info-text"])
                     
                     with gr.Row():
                         t2v_resolution = gr.Dropdown(
                             ["540P", "720P"], 
                             label="Resolution", 
-                            value="540P",
-                            info="540P is faster, 720P gives higher quality but needs more VRAM (40GB+)"
+                            value="540P"
                         )
+                        gr.Markdown("*540P is faster, 720P gives higher quality but needs more VRAM (40GB+)*", elem_classes=["info-text"])
+                        
                         t2v_aspect = gr.Dropdown(
                             list(ASPECT_RATIOS.keys()),
                             label="Aspect Ratio",
-                            value="16:9 (Landscape)",
-                            info="Choose the aspect ratio for your video"
+                            value="16:9 (Landscape)"
                         )
                     
                     with gr.Row():
                         t2v_num = gr.Slider(
                             16, 360, 
                             label="Frames", 
-                            value=48,
-                            info="More frames = longer video, but needs more memory"
+                            value=48
                         )
                         t2v_fps = gr.Slider(
                             1, 60, 
                             label="FPS", 
-                            value=24,
-                            info="Frames per second determines playback speed (24 is standard)"
+                            value=24
                         )
+                    gr.Markdown("*More frames = longer video. 24 FPS is standard film framerate.*", elem_classes=["info-text"])
                     
                     with gr.Row():
                         t2v_guidance = gr.Slider(
                             1.0, 10.0, 
                             label="Guidance Scale", 
-                            value=6.0,
-                            info="Higher values follow the prompt more closely (5-7 recommended)"
+                            value=6.0
                         )
                         t2v_shift = gr.Slider(
                             1.0, 10.0, 
                             label="Shift", 
-                            value=8.0,
-                            info="Controls flow matching (8.0 recommended for T2V)"
+                            value=8.0
                         )
+                    gr.Markdown("*For T2V: Guidance Scale 6.0 and Shift 8.0 recommended*", elem_classes=["info-text"])
                     
                     t2v_seed = gr.Number(
                         label="Seed (optional)", 
                         value=None, 
-                        precision=0,
-                        info="Set for reproducible results, leave empty for random"
+                        precision=0
                     )
+                    gr.Markdown("*Set for reproducible results, leave empty for random*", elem_classes=["info-text"])
                     
                     with gr.Row():
                         t2v_offload = gr.Checkbox(
                             label="Offload", 
-                            value=True,
-                            info="Reduces VRAM usage by offloading model parts to CPU"
+                            value=True
                         )
                         t2v_use_usp = gr.Checkbox(
                             label="Use USP", 
-                            value=False,
-                            info="Enables multi-GPU acceleration if available"
+                            value=False
                         )
+                    gr.Markdown("*Offload reduces VRAM usage. USP enables multi-GPU acceleration if available.*", elem_classes=["info-text"])
                     
                     with gr.Accordion("Advanced Options (Diffusion Forcing)", open=False):
                         t2v_ar_step = gr.Number(
                             label="AR Step", 
                             value=0, 
-                            precision=0,
-                            info="0 for synchronous, 5 for asynchronous generation"
+                            precision=0
                         )
+                        gr.Markdown("*0 for synchronous, 5 for asynchronous generation*", elem_classes=["info-text"])
+                        
                         t2v_base_nf = gr.Slider(
                             16, 360, 
                             label="Base Frames", 
-                            value=48,
-                            info="Base frame count (reduce to save VRAM)"
+                            value=48
                         )
+                        gr.Markdown("*Base frame count (reduce to save VRAM)*", elem_classes=["info-text"])
+                        
                         t2v_overlap = gr.Slider(
                             0, 60, 
                             label="Overlap History", 
-                            value=17,
-                            info="Overlap frames for long videos (17 or 37 recommended)"
+                            value=17
                         )
+                        gr.Markdown("*Overlap frames for long videos (17 or 37 recommended)*", elem_classes=["info-text"])
+                        
                         t2v_noise_c = gr.Slider(
                             0, 60, 
                             label="Noise Condition", 
-                            value=20,
-                            info="Smooths long videos (20 recommended, max 50)"
+                            value=20
                         )
+                        gr.Markdown("*Smooths long videos (20 recommended, max 50)*", elem_classes=["info-text"])
                     
                     t2v_button = gr.Button("Generate Video", variant="primary")
                 
@@ -466,105 +465,98 @@ def create_interface():
                         i2v_model = gr.Dropdown(
                             i2v_models, 
                             label="Model", 
-                            value=i2v_models[0] if i2v_models else None,
-                            elem_classes=["model-select"],
-                            info="Select the image-to-video model to use for generation."
+                            value=i2v_models[0] if i2v_models else None
                         )
+                        gr.Markdown("*Select the image-to-video model to use for generation*", elem_classes=["info-text"])
                     else:
                         gr.Markdown("⚠️ No Image-to-Video models available. Please download models first.")
                         i2v_model = gr.Dropdown([], label="Model (no models available)")
                     
                     i2v_image = gr.Image(
                         type="pil", 
-                        label="Input Image",
-                        info="Upload an image to animate"
+                        label="Input Image"
                     )
+                    gr.Markdown("*Upload an image to animate*", elem_classes=["info-text"])
                     
                     i2v_prompt = gr.Textbox(
                         lines=3, 
                         placeholder="Describe how the image should animate into a video...", 
-                        label="Prompt",
-                        info="Describe the motion and action you want to see in the video"
+                        label="Prompt"
                     )
+                    gr.Markdown("*Describe the motion and action you want to see in the video*", elem_classes=["info-text"])
                     
                     with gr.Row():
                         i2v_resolution = gr.Dropdown(
                             ["540P", "720P"], 
                             label="Resolution", 
-                            value="720P",
-                            info="540P is faster, 720P gives higher quality but needs more VRAM"
+                            value="720P"
                         )
                         i2v_aspect = gr.Dropdown(
                             list(ASPECT_RATIOS.keys()),
                             label="Aspect Ratio",
-                            value="16:9 (Landscape)",
-                            info="Choose the aspect ratio for your video"
+                            value="16:9 (Landscape)"
                         )
+                    gr.Markdown("*540P is faster, 720P gives higher quality but needs more VRAM*", elem_classes=["info-text"])
                     
                     with gr.Row():
                         i2v_num = gr.Slider(
                             16, 360, 
                             label="Frames", 
-                            value=48,
-                            info="More frames = longer video, but needs more memory"
+                            value=48
                         )
                         i2v_fps = gr.Slider(
                             1, 60, 
                             label="FPS", 
-                            value=24,
-                            info="Frames per second determines playback speed"
+                            value=24
                         )
+                    gr.Markdown("*More frames = longer video. 24 FPS is standard film framerate.*", elem_classes=["info-text"])
                     
                     with gr.Row():
                         i2v_guidance = gr.Slider(
                             1.0, 10.0, 
                             label="Guidance Scale", 
-                            value=5.0,
-                            info="5.0 recommended for I2V"
+                            value=5.0
                         )
                         i2v_shift = gr.Slider(
                             1.0, 10.0, 
                             label="Shift", 
-                            value=3.0,
-                            info="3.0 recommended for I2V"
+                            value=3.0
                         )
+                    gr.Markdown("*For I2V: Guidance Scale 5.0 and Shift 3.0 recommended*", elem_classes=["info-text"])
                     
                     i2v_seed = gr.Number(
                         label="Seed (optional)", 
                         value=None, 
-                        precision=0,
-                        info="Set for reproducible results, leave empty for random"
+                        precision=0
                     )
+                    gr.Markdown("*Set for reproducible results, leave empty for random*", elem_classes=["info-text"])
                     
                     with gr.Row():
                         i2v_offload = gr.Checkbox(
                             label="Offload", 
-                            value=True,
-                            info="Reduces VRAM usage by offloading model parts to CPU"
+                            value=True
                         )
                         i2v_use_usp = gr.Checkbox(
                             label="Use USP", 
-                            value=False,
-                            info="Enables multi-GPU acceleration if available"
+                            value=False
                         )
+                    gr.Markdown("*Offload reduces VRAM usage. USP enables multi-GPU acceleration if available.*", elem_classes=["info-text"])
                     
                     with gr.Accordion("Advanced Options", open=False):
                         i2v_teacache = gr.Checkbox(
                             label="Use TEACache", 
-                            value=True,
-                            info="Speeds up inference by caching attention values"
+                            value=True
                         )
                         i2v_ret = gr.Checkbox(
                             label="Use RetSteps", 
-                            value=True,
-                            info="Improves speed and quality when using TEACache"
+                            value=True
                         )
                         i2v_tc_thresh = gr.Slider(
                             0.0, 1.0, 
                             label="TEACache Threshold", 
-                            value=0.3,
-                            info="Higher value = faster but potentially lower quality"
+                            value=0.3
                         )
+                    gr.Markdown("*TEACache speeds up inference. RetSteps improves speed and quality.*", elem_classes=["info-text"])
                     
                     i2v_button = gr.Button("Generate Video", variant="primary")
                 
