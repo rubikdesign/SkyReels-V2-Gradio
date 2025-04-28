@@ -19,6 +19,11 @@ IMAGE_OUTPUT_DIR = "./image_out"
 os.makedirs(VIDEO_OUTPUT_DIR, exist_ok=True)
 os.makedirs(IMAGE_OUTPUT_DIR, exist_ok=True)
 
+# Negative prompt predefinit (poate fi modificat de utilizator)
+DEFAULT_NEGATIVE_PROMPT = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+
+ENGLISH_NEGATIVE_PROMPT = "Vibrant colors, overexposed, static, blurry details, subtitles, stylized, artwork, painting, still image, overall greyness, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, deformed limbs, fused fingers, motionless scene, cluttered background, three legs, crowded background, walking backwards"
+
 # Define all model categories
 MODEL_INFO = {
     "SkyReels-V2-T2V-14B-540P": {
@@ -220,7 +225,7 @@ FLAG_ONLY_ARGS = {
     "cfg_rescale"
 }
 
-def build_command(script, model_path, resolution, aspect_ratio, num_frames, fps, prompt, **kwargs):
+def build_command(script, model_path, resolution, aspect_ratio, num_frames, fps, prompt, negative_prompt=None, **kwargs):
     """Build a subprocess command list with resolution and aspect ratio support."""
     # Get width and height based on aspect ratio
     width, height = parse_resolution_and_aspect(resolution, aspect_ratio)
@@ -234,6 +239,10 @@ def build_command(script, model_path, resolution, aspect_ratio, num_frames, fps,
         "--prompt", prompt,
         "--outdir", "video_out"
     ]
+    
+    # Add negative prompt if provided
+    if negative_prompt:
+        cmd.extend(["--negative_prompt", negative_prompt])
     
     # Add the width and height parameters directly
     cmd.extend(["--width", str(width), "--height", str(height)])
@@ -264,10 +273,43 @@ def run_and_yield_logs(cmd):
         yield line.rstrip()
     proc.wait()
 
+# -- PROMPT ENHANCER FUNCTION -------------------------------------------------
+
+def run_prompt_enhancer(prompt):
+    """Run the prompt enhancer script to enhance a basic prompt."""
+    try:
+        cmd = [
+            sys.executable,
+            "skyreels_v2_infer/pipelines/prompt_enhancer.py",
+            "--prompt", prompt
+        ]
+        
+        result = subprocess.run(
+            cmd, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        
+        # Extract the enhanced prompt from the output
+        output_lines = result.stdout.split('\n')
+        enhanced_prompt = ""
+        for line in output_lines:
+            if line.startswith('Enhanced prompt:'):
+                enhanced_prompt = line.replace('Enhanced prompt:', '').strip()
+                break
+        
+        return enhanced_prompt if enhanced_prompt else result.stdout
+    except subprocess.CalledProcessError as e:
+        return f"Error running prompt enhancer: {e.stderr}"
+    except Exception as e:
+        return f"Unexpected error: {str(e)}"
+
 # -- GENERATION FUNCTIONS -----------------------------------------------------
 
 def text_to_video_live(
-    prompt, model_name, resolution, aspect_ratio, num_frames, fps,
+    prompt, negative_prompt, model_name, resolution, aspect_ratio, num_frames, fps,
     guidance_scale, shift, steps, seed, offload, use_usp, cfg_rescale,
     prompt_enhancer, causal_attention,
     ar_step=None, base_num_frames=None, overlap_history=None, addnoise_condition=None
@@ -287,6 +329,7 @@ def text_to_video_live(
 
     cmd = build_command(
         script, model_path, resolution, aspect_ratio, num_frames, fps, prompt,
+        negative_prompt=negative_prompt if negative_prompt else None,
         # core args
         guidance_scale=(None if is_df else guidance_scale),
         shift=(None if is_df else shift),
@@ -314,7 +357,7 @@ def text_to_video_live(
     yield out, logs
 
 def image_to_video_live(
-    image, prompt, model_name, resolution, aspect_ratio, num_frames, fps,
+    image, prompt, negative_prompt, model_name, resolution, aspect_ratio, num_frames, fps,
     guidance_scale, shift, steps, seed, offload, teacache, use_ret_steps, teacache_thresh, 
     use_usp, cfg_rescale, prompt_enhancer, causal_attention
 ):
@@ -334,6 +377,7 @@ def image_to_video_live(
     cmd = build_command(
         "generate_video.py", os.path.join(MODEL_DIR, model_name),
         resolution, aspect_ratio, num_frames, fps, prompt,
+        negative_prompt=negative_prompt if negative_prompt else None,
         # core args
         image=img_path,
         guidance_scale=guidance_scale,
@@ -504,6 +548,14 @@ def create_interface():
             margin-bottom: 15px;
             border-radius: 4px;
         }
+        .duration-info {
+            padding: 5px 10px;
+            background-color: #e9f7fe;
+            border-radius: 4px;
+            font-size: 0.9em;
+            margin: 5px 0;
+            border-left: 2px solid #1f77b4;
+        }
     """) as demo:
         with gr.Row(elem_classes=["header-gradient"]):
             gr.Markdown("# SkyReels-V2 Video Generator")
@@ -523,6 +575,35 @@ def create_interface():
         
         # Main tabs for generation
         with gr.Tabs() as tabs:
+            # Prompt Enhancer tab
+            with gr.TabItem("Prompt Enhancer", id="prompt-enhancer"):
+                with gr.Row():
+                    with gr.Column():
+                        enhance_input = gr.Textbox(
+                            label="Original Prompt",
+                            placeholder="Enter a basic prompt to enhance...",
+                            lines=3
+                        )
+                        enhance_button = gr.Button("Enhance Prompt", variant="primary")
+                        gr.Markdown("""
+                        *Prompt Enhancer uses Qwen2.5-32B-Instruct to transform your basic prompts into detailed video generation captions.
+                        It works best with short inputs, adding shot details, scene composition, lighting, atmosphere, and more.*
+                        """, elem_classes=["info-text"])
+                        
+                    with gr.Column():
+                        enhance_output = gr.Textbox(
+                            label="Enhanced Prompt",
+                            lines=8,
+                            interactive=True
+                        )
+                        enhance_status = gr.Markdown("")
+                
+                enhance_button.click(
+                    fn=run_prompt_enhancer,
+                    inputs=[enhance_input],
+                    outputs=[enhance_output]
+                )
+                
             # Text to Video tab
             with gr.TabItem("Text to Video", id="text-to-video"):
                 with gr.Row():
@@ -545,6 +626,15 @@ def create_interface():
                         )
                         gr.Markdown("*A detailed prompt will lead to better results. Describe the scene, subjects, actions, and atmosphere.*", elem_classes=["info-text"])
                         
+                        # Adăugăm negative prompt
+                        t2v_negative_prompt = gr.Textbox(
+                            lines=2,
+                            label="Negative Prompt (optional)",
+                            placeholder="Enter concepts to avoid in the video...",
+                            value=ENGLISH_NEGATIVE_PROMPT
+                        )
+                        gr.Markdown("*Describe what you don't want to see in the video. Leave empty to use the default negative prompt.*", elem_classes=["info-text"])
+                        
                         with gr.Row():
                             t2v_resolution = gr.Dropdown(
                                 ["540P", "720P"], 
@@ -559,17 +649,41 @@ def create_interface():
                             )
                         gr.Markdown("*540P is faster, 720P gives higher quality but needs more VRAM (40GB+)*", elem_classes=["info-text"])
                         
-                        with gr.Row():
-                            t2v_num = gr.Slider(
-                                16, 360, 
-                                label="Frames", 
-                                value=48
-                            )
-                            t2v_fps = gr.Slider(
-                                1, 60, 
-                                label="FPS", 
-                                value=24
-                            )
+                        # Mărim limita pentru numărul de cadre și adăugăm estimarea duratei
+                        t2v_num = gr.Slider(
+                            16, 1800,  # Extins la 1800 de cadre (cca. 1-2 minute la 24 FPS)
+                            label="Frames", 
+                            value=48
+                        )
+                        t2v_fps = gr.Slider(
+                            1, 60, 
+                            label="FPS", 
+                            value=24
+                        )
+                        t2v_duration_info = gr.Markdown("", elem_classes=["duration-info"])
+                        
+                        # Funcția pentru actualizarea informațiilor despre durată
+                        def update_t2v_duration(frames, fps):
+                            seconds = frames / fps
+                            if seconds < 60:
+                                return f"Video duration estimate: **{seconds:.1f}** seconds"
+                            else:
+                                minutes = seconds // 60
+                                rem_seconds = seconds % 60
+                                return f"Video duration estimate: **{minutes:.0f}m {rem_seconds:.0f}s** ({seconds:.1f} seconds total)"
+                        
+                        # Conectăm funcția la sliderele pentru cadre și FPS
+                        t2v_num.change(
+                            fn=update_t2v_duration,
+                            inputs=[t2v_num, t2v_fps],
+                            outputs=[t2v_duration_info]
+                        )
+                        t2v_fps.change(
+                            fn=update_t2v_duration,
+                            inputs=[t2v_num, t2v_fps],
+                            outputs=[t2v_duration_info]
+                        )
+                        
                         gr.Markdown("*More frames = longer video. 24 FPS is standard film framerate.*", elem_classes=["info-text"])
                         
                         with gr.Row():
@@ -636,7 +750,7 @@ def create_interface():
                             gr.Markdown("*0 for synchronous, 5 for asynchronous generation*", elem_classes=["info-text"])
                             
                             t2v_base_nf = gr.Slider(
-                                16, 360, 
+                                16, 1800,  # Extins la 1800 pentru consistență
                                 label="Base Frames", 
                                 value=48
                             )
@@ -690,6 +804,15 @@ def create_interface():
                         )
                         gr.Markdown("*Describe the motion and action you want to see in the video*", elem_classes=["info-text"])
                         
+                        # Adăugăm negative prompt
+                        i2v_negative_prompt = gr.Textbox(
+                            lines=2,
+                            label="Negative Prompt (optional)",
+                            placeholder="Enter concepts to avoid in the video...",
+                            value=ENGLISH_NEGATIVE_PROMPT
+                        )
+                        gr.Markdown("*Describe what you don't want to see in the video. Leave empty to use the default negative prompt.*", elem_classes=["info-text"])
+                        
                         with gr.Row():
                             i2v_resolution = gr.Dropdown(
                                 ["540P", "720P"], 
@@ -703,17 +826,41 @@ def create_interface():
                             )
                         gr.Markdown("*540P is faster, 720P gives higher quality but needs more VRAM*", elem_classes=["info-text"])
                         
-                        with gr.Row():
-                            i2v_num = gr.Slider(
-                                16, 360, 
-                                label="Frames", 
-                                value=48
-                            )
-                            i2v_fps = gr.Slider(
-                                1, 60, 
-                                label="FPS", 
-                                value=24
-                            )
+                        # Mărim limita pentru numărul de cadre și adăugăm estimarea duratei
+                        i2v_num = gr.Slider(
+                            16, 1800,  # Extins la 1800 de cadre
+                            label="Frames", 
+                            value=48
+                        )
+                        i2v_fps = gr.Slider(
+                            1, 60, 
+                            label="FPS", 
+                            value=24
+                        )
+                        i2v_duration_info = gr.Markdown("", elem_classes=["duration-info"])
+                        
+                        # Funcția pentru actualizarea informațiilor despre durată
+                        def update_i2v_duration(frames, fps):
+                            seconds = frames / fps
+                            if seconds < 60:
+                                return f"Video duration estimate: **{seconds:.1f}** seconds"
+                            else:
+                                minutes = seconds // 60
+                                rem_seconds = seconds % 60
+                                return f"Video duration estimate: **{minutes:.0f}m {rem_seconds:.0f}s** ({seconds:.1f} seconds total)"
+                        
+                        # Conectăm funcția la sliderele pentru cadre și FPS
+                        i2v_num.change(
+                            fn=update_i2v_duration,
+                            inputs=[i2v_num, i2v_fps],
+                            outputs=[i2v_duration_info]
+                        )
+                        i2v_fps.change(
+                            fn=update_i2v_duration,
+                            inputs=[i2v_num, i2v_fps],
+                            outputs=[i2v_duration_info]
+                        )
+                        
                         gr.Markdown("*More frames = longer video. 24 FPS is standard film framerate.*", elem_classes=["info-text"])
                         
                         with gr.Row():
@@ -813,12 +960,14 @@ def create_interface():
                 
                 ### Text-to-Video
                 - **Prompt**: Detailed descriptions work best. Describe subjects, actions, environment, lighting.
+                - **Negative Prompt**: Concepts to avoid in generation. Use this to prevent unwanted elements.
                 - **Guidance Scale**: 6.0 recommended for T2V. Higher values follow the prompt more strictly.
                 - **Shift**: 8.0 recommended for T2V.
                 - **Inference Steps**: 30 is a good balance between quality and speed. Increase for better quality.
                 
                 ### Image-to-Video
                 - **Prompt**: Describe how the image should animate.
+                - **Negative Prompt**: Concepts to avoid in generation. Use this to prevent unwanted elements.
                 - **Guidance Scale**: 5.0 recommended for I2V.
                 - **Shift**: 3.0 recommended for I2V.
                 - **Inference Steps**: 30 is a good balance between quality and speed. Increase for better quality.
@@ -828,6 +977,13 @@ def create_interface():
                 - **Base Frames**: Reduce to save VRAM, but may impact quality.
                 - **Overlap History**: Use 17 or 37 for long videos.
                 - **Noise Condition**: Set to 20 for smoother long videos (max 50).
+                
+                ## Long Video Generation Tips
+                
+                - For videos longer than 30 seconds, use Diffusion Forcing (DF) models
+                - Set appropriate Overlap History (17 or 37 recommended)
+                - Monitor your VRAM usage - longer videos require more memory
+                - Consider lowering resolution to 540P for very long videos
                 
                 ## Optimization
                 
@@ -850,6 +1006,7 @@ def create_interface():
                 4. Start with recommended parameter values before experimenting
                 5. If your GPU has sufficient VRAM, use higher resolution and step counts
                 6. For Image-to-Video, use clear images with good lighting and framing
+                7. Use the Prompt Enhancer tab to create more detailed prompts from simple ideas
                 """)
         
         # Function to refresh available models
@@ -870,11 +1027,15 @@ def create_interface():
             outputs=[t2v_model, i2v_model, refresh_status]
         )
         
+        # Inițializare imediată a estimărilor de durată
+        t2v_duration_info.value = update_t2v_duration(48, 24)
+        i2v_duration_info.value = update_t2v_duration(48, 24)
+        
         # Hook up callbacks
         t2v_button.click(
             fn=text_to_video_live,
             inputs=[
-                t2v_prompt, t2v_model, t2v_resolution, t2v_aspect, t2v_num, t2v_fps,
+                t2v_prompt, t2v_negative_prompt, t2v_model, t2v_resolution, t2v_aspect, t2v_num, t2v_fps,
                 t2v_guidance, t2v_shift, t2v_steps, t2v_seed, t2v_offload, t2v_use_usp,
                 t2v_cfg_rescale, t2v_prompt_enhancer, t2v_causal_attention,
                 t2v_ar_step, t2v_base_nf, t2v_overlap, t2v_noise_c
@@ -886,7 +1047,7 @@ def create_interface():
         i2v_button.click(
             fn=image_to_video_live,
             inputs=[
-                i2v_image, i2v_prompt, i2v_model, i2v_resolution, i2v_aspect, i2v_num, i2v_fps,
+                i2v_image, i2v_prompt, i2v_negative_prompt, i2v_model, i2v_resolution, i2v_aspect, i2v_num, i2v_fps,
                 i2v_guidance, i2v_shift, i2v_steps, i2v_seed, i2v_offload, i2v_teacache,
                 i2v_ret, i2v_tc_thresh, i2v_use_usp, i2v_cfg_rescale, i2v_prompt_enhancer,
                 i2v_causal_attention
