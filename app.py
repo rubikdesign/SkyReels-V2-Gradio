@@ -286,36 +286,50 @@ def create_download_interface():
         gr.Markdown("Select models to download:")
         
         missing_models = get_missing_models()
-        model_checkboxes = {}
         
         if not missing_models:
             gr.Markdown("✅ All models are already downloaded.")
-        else:
-            with gr.Group():
-                for model in missing_models:
-                    desc = MODEL_INFO[model]["desc"]
-                    model_checkboxes[model] = gr.Checkbox(label=f"{model} - {desc}", value=False)
-                
-                with gr.Row():
-                    download_btn = gr.Button("Download Selected Models", variant="primary")
-                    select_all_btn = gr.Button("Select All")
+            return download_ui
+        
+        with gr.Group():
+            # Creez o listă pentru a ține stările checkboxurilor
+            checkbox_list = []
             
-            download_status = gr.Textbox(label="Download Status", interactive=False)
+            # Adaug un checkbox pentru fiecare model lipsă
+            for model in missing_models:
+                desc = MODEL_INFO[model]["desc"]
+                checkbox = gr.Checkbox(label=f"{model} - {desc}", value=False)
+                checkbox_list.append(checkbox)
             
-            # Download button callback
-            def download_models_callback():
-                selected = [model for model, checkbox in model_checkboxes.items() if checkbox.value]
-                if not selected:
-                    return "No models selected."
-                return download_selected_models(selected)
-            
-            download_btn.click(download_models_callback, outputs=download_status)
-            
-            # Select all button callback
-            def select_all():
-                return [gr.update(value=True) for _ in model_checkboxes]
-            
-            select_all_btn.click(select_all, outputs=list(model_checkboxes.values()))
+            with gr.Row():
+                download_btn = gr.Button("Download Selected Models", variant="primary")
+                select_all_btn = gr.Button("Select All")
+        
+        download_status = gr.Textbox(label="Download Status", interactive=False)
+        
+        # Funcția pentru descărcarea modelelor selectate
+        def download_models_callback(*checkbox_values):
+            selected = [model for model, is_selected in zip(missing_models, checkbox_values) if is_selected]
+            if not selected:
+                return "No models selected."
+            return download_selected_models(selected)
+        
+        # Conectez toate checkboxurile la butonul de descărcare
+        download_btn.click(
+            download_models_callback,
+            inputs=checkbox_list,
+            outputs=download_status
+        )
+        
+        # Funcția pentru selectarea tuturor modelelor
+        def select_all():
+            return [gr.update(value=True) for _ in checkbox_list]
+        
+        # Conectez butonul "Select All" la toate checkboxurile
+        select_all_btn.click(
+            select_all,
+            outputs=checkbox_list
+        )
     
     return download_ui
 
@@ -639,6 +653,9 @@ def create_interface():
     return demo
 
 if __name__ == "__main__":
+    # Asigură-te că directorul pentru modele există
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    
     demo = create_interface()
     demo.queue()
     demo.launch(share=True, debug=True)
