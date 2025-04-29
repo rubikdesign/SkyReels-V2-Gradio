@@ -5,11 +5,13 @@ import sys
 import time
 from glob import glob
 import threading
-
 import gradio as gr
 from PIL import Image
 import torch
 import numpy as np
+import signal
+from contextlib import contextmanager
+from transformers import pipeline
 
 # -- CONFIG -------------------------------------------------------------------
 
@@ -305,12 +307,56 @@ def run_prompt_enhancer(prompt):
         return f"Unexpected error: {str(e)}"
 
 
-# -- MISTRAL PROMPT ENHANCER FUNCTION -------------------------------------------
-def get_mistral_enhancer():
-    """Lazy-load the Mistral prompt enhancer model."""
+# -- MISTRAL PROMPT ENHANCER FUNCTION (IMPROVED v2) -------------------------------------------
+
+# Variabilă globală pentru pipeline, pentru a evita încărcarea repetată
+_mistral_pipe = None
+
+class TimeoutError(Exception):
+    """Excepție personalizată pentru timeout"""
+    pass
+
+def run_with_timeout(func, args=(), kwargs={}, timeout_seconds=60):
+    """Rulează o funcție cu timeout folosind threading în loc de signal"""
+    result = [None]
+    error = [None]
+    completed = [False]
+    
+    def target():
+        try:
+            result[0] = func(*args, **kwargs)
+            completed[0] = True
+        except Exception as e:
+            error[0] = e
+    
+    thread = threading.Thread(target=target)
+    thread.daemon = True  # Thread-ul va fi terminat când programul principal se închide
+    
+    thread.start()
+    thread.join(timeout_seconds)
+    
+    if not completed[0]:
+        if thread.is_alive():
+            print(f"Operation timed out after {timeout_seconds} seconds!")
+            return None, TimeoutError(f"Operation timed out after {timeout_seconds} seconds")
+    
+    if error[0] is not None:
+        return None, error[0]
+        
+    return result[0], None
+
+def get_mistral_enhancer(nsfw_allowed=True, timeout_seconds=300):
+    """Lazy-load the Mistral prompt enhancer model with explicit NSFW handling.
+    
+    Args:
+        nsfw_allowed (bool): If True, will allow processing of NSFW prompts with explicit warnings.
+                             If False, will reject NSFW prompts.
+        timeout_seconds (int): Timpul maxim în secunde pentru generare
+    """
+    global _mistral_pipe
+    
     try:
-        from transformers import pipeline
-        # Verifică dacă modelul există deja local
+        # Check if model exists locally
         import os
         model_path = os.path.join("models", "mistral-7b-instruct-v0.2")
         if os.path.exists(model_path):
@@ -320,46 +366,153 @@ def get_mistral_enhancer():
             print("Downloading Mistral model from Hugging Face...")
             model_source = "mistralai/Mistral-7B-Instruct-v0.2"
         
-        return pipeline(
-            "text-generation",
-            model=model_source,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-            max_new_tokens=256,
-        )
+        def generate_with_nsfw_check(prompt, **kwargs):
+            global _mistral_pipe
+            # NSFW content detection (simple example - would need more robust checking)
+            nsfw_keywords = ['nsfw', 'explicit', 'adult', 'porn', 'sexual', 'nude']
+            is_nsfw = any(keyword in prompt.lower() for keyword in nsfw_keywords)
+            
+            if is_nsfw and not nsfw_allowed:
+                return "[BLOCKED] This prompt contains NSFW content which is not allowed in the current configuration."
+            
+            # Add explicit NSFW instruction if allowed
+            if is_nsfw and nsfw_allowed:
+                prompt = f"[EXPLICIT CONTENT ENABLED] {prompt}"
+                print("WARNING: Generating content with explicit NSFW prompt")
+            
+            # Create the pipeline if it doesn't exist
+            if _mistral_pipe is None:
+                print("Creating Mistral pipeline...")
+                try:
+                    # Verificare memorie disponibilă (simplificată)
+                    if torch.cuda.is_available():
+                        free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+                        print(f"Free GPU memory: {free_memory / (1024**3):.2f} GB")
+                        if free_memory < 8 * (1024**3):  # Sub 8GB
+                            print("WARNING: Low GPU memory. Using 8-bit quantization.")
+                            kwargs["load_in_8bit"] = True
+                    
+                    # Folosim funcția noastră cu timeout
+                    print("Starting pipeline creation (timeout: 120s)...")
+                    create_pipeline = lambda: pipeline(
+                        "text-generation",
+                        model=model_source,
+                        device_map="auto",
+                        torch_dtype=torch.float16,
+                        trust_remote_code=True,
+                        max_new_tokens=256,
+                    )
+                    
+                    pipe, error = run_with_timeout(create_pipeline, timeout_seconds=120)
+                    
+                    if error:
+                        print(f"Error creating pipeline: {str(error)}")
+                        return f"[ERROR] Could not create pipeline: {str(error)}"
+                    
+                    _mistral_pipe = pipe
+                    print("Pipeline created successfully!")
+                    
+                except Exception as e:
+                    print(f"Error creating pipeline: {str(e)}")
+                    return f"[ERROR] Could not create pipeline: {str(e)}"
+            
+            print(f"Generating text with prompt length: {len(prompt)} characters...")
+            start_time = time.time()
+            
+            try:
+                # Funcția pentru generarea textului
+                def generate_text():
+                    return _mistral_pipe(prompt, **kwargs)
+                
+                # Rulăm cu timeout
+                result, error = run_with_timeout(generate_text, timeout_seconds=timeout_seconds)
+                
+                if error:
+                    if isinstance(error, TimeoutError):
+                        print(f"Generation timed out after {timeout_seconds} seconds!")
+                        return "[TIMEOUT] Text generation took too long and was interrupted."
+                    else:
+                        print(f"Error during generation: {str(error)}")
+                        return f"[ERROR] {str(error)}"
+                
+                print(f"Generation completed in {time.time() - start_time:.2f} seconds")
+                return result
+                
+            except Exception as e:
+                print(f"Error during generation: {str(e)}")
+                return f"[ERROR] {str(e)}"
+            
+        return generate_with_nsfw_check
     except Exception as e:
         print(f"Error loading Mistral model: {str(e)}")
         return None
 
 def enhance_prompt_with_mistral(text):
-
+    """Generator function for enhancing prompts with Mistral."""
+    if not text.strip():
+        yield text, "⚠️ Please enter a prompt first!"
+        return
+    
+    status_message = "🔄 Loading Mistral model and enhancing prompt..."
+    yield text, status_message  # Returnează mesajul inițial de status
+    
     try:
-        if not text.strip():
-            return text, "⚠️ Please enter a prompt first!"
-        
-        status_message = "🔄 Loading Mistral model and enhancing prompt..."
-        yield text, status_message  # Returnează mesajul inițial de status
-        
         # Lazy-load modelul la prima utilizare
-        enhancer = get_mistral_enhancer()
+        enhancer = get_mistral_enhancer(timeout_seconds=60)  # Timeout de 60 secunde pentru generare
         if enhancer is None:
-            return text, "❌ Error: Could not load Mistral model. Check console for details."
+            yield text, "❌ Error: Could not load Mistral model. Check console for details."
+            return
         
         system_msg = "Rewrite the prompt for high‑quality AI video; keep meaning, add cinematic detail, concise English."
         prompt = f"<s>[INST] <<SYS>>{system_msg}<</SYS>>\n{text} [/INST]"
         
-        resp = enhancer(prompt, temperature=0.7, top_p=0.9, max_new_tokens=160)[0]["generated_text"]
-        enhanced = resp.split("[/INST]")[-1].strip()
+        # Adaugă feedback intermediar pentru utilizator
+        yield text, "🔄 Model loaded. Generating enhanced prompt..."
+        
+        resp = enhancer(prompt, temperature=0.7, do_sample=True, max_new_tokens=256)
+        
+        # Verifică dacă resp este string (în caz de eroare) sau lista de rezultate
+        if isinstance(resp, str):
+            # Deja avem un mesaj de eroare
+            yield text, f"⚠️ {resp}"
+            return
+            
+        # Verifică dacă avem un rezultat valid
+        if not resp or not isinstance(resp, list) or len(resp) == 0 or "generated_text" not in resp[0]:
+            yield text, "⚠️ Enhancement failed! Original prompt retained."
+            return
+            
+        generated_text = resp[0]["generated_text"]
+        
+        # Verifică dacă avem [/INST] în text
+        if "[/INST]" not in generated_text:
+            yield text, "⚠️ Invalid response format. Original prompt retained."
+            return
+            
+        enhanced = generated_text.split("[/INST]")[-1].strip()
         
         # Verifică dacă rezultatul nu este gol
         if not enhanced:
-            return text, "⚠️ Enhancement failed! Original prompt retained."
+            yield text, "⚠️ Enhancement failed! Original prompt retained."
+            return
         
-        return enhanced, "✅ Prompt enhanced successfully with Mistral-7B!"
+        yield enhanced, "✅ Prompt enhanced successfully with Mistral-7B!"
     except Exception as e:
         print(f"Error enhancing prompt: {str(e)}")
-        return text, f"❌ Error enhancing prompt: {str(e)}"
+        yield text, f"❌ Error enhancing prompt: {str(e)}"
+
+# Exemplu de utilizare (comentat, de decomenteat pentru testare):
+"""
+if __name__ == "__main__":
+    test_prompt = "A futuristic city with flying cars"
+    generator = enhance_prompt_with_mistral(test_prompt)
+    
+    # Afișează fiecare stare intermediară
+    for prompt, status in generator:
+        print(f"Status: {status}")
+        print(f"Current prompt: {prompt}")
+        print("-" * 50)
+"""
 
 # -- GENERATION FUNCTIONS -----------------------------------------------------
 
