@@ -333,12 +333,18 @@ def get_mistral_enhancer():
         return None
 
 def enhance_prompt_with_mistral(text):
-    """Îmbunătățirea promptului folosind modelul Mistral-7B-Instruct-v0.2."""
+
     try:
+        if not text.strip():
+            return text, "⚠️ Please enter a prompt first!"
+        
+        status_message = "🔄 Loading Mistral model and enhancing prompt..."
+        yield text, status_message  # Returnează mesajul inițial de status
+        
         # Lazy-load modelul la prima utilizare
         enhancer = get_mistral_enhancer()
         if enhancer is None:
-            return "Error: Could not load Mistral model. Check console for details."
+            return text, "❌ Error: Could not load Mistral model. Check console for details."
         
         system_msg = "Rewrite the prompt for high‑quality AI video; keep meaning, add cinematic detail, concise English."
         prompt = f"<s>[INST] <<SYS>>{system_msg}<</SYS>>\n{text} [/INST]"
@@ -348,11 +354,12 @@ def enhance_prompt_with_mistral(text):
         
         # Verifică dacă rezultatul nu este gol
         if not enhanced:
-            return text
-        return enhanced
+            return text, "⚠️ Enhancement failed! Original prompt retained."
+        
+        return enhanced, "✅ Prompt enhanced successfully with Mistral-7B!"
     except Exception as e:
         print(f"Error enhancing prompt: {str(e)}")
-        return f"Error enhancing prompt: {str(e)}"
+        return text, f"❌ Error enhancing prompt: {str(e)}"
 
 # -- GENERATION FUNCTIONS -----------------------------------------------------
 
@@ -673,10 +680,11 @@ def create_interface():
                             label="Prompt"
                         )
                         t2v_enhance_btn = gr.Button("Enhance with Mistral-7B", variant="secondary", size="sm")
+
                         t2v_enhance_btn.click(
                             fn=enhance_prompt_with_mistral,
                             inputs=[t2v_prompt],
-                            outputs=[t2v_prompt]
+                            outputs=[t2v_prompt, t2v_enhance_status]
                         )
                         gr.Markdown("*A detailed prompt will lead to better results. Describe the scene, subjects, actions, and atmosphere.*", elem_classes=["info-text"])
                         
@@ -857,10 +865,11 @@ def create_interface():
                             label="Prompt"
                         )
                         i2v_enhance_btn = gr.Button("Enhance with Mistral-7B", variant="secondary", size="sm")
+                        
                         i2v_enhance_btn.click(
                             fn=enhance_prompt_with_mistral,
                             inputs=[i2v_prompt],
-                            outputs=[i2v_prompt]
+                            outputs=[i2v_prompt, i2v_enhance_status]
                         )
                         gr.Markdown("*Describe the motion and action you want to see in the video*", elem_classes=["info-text"])
                         
