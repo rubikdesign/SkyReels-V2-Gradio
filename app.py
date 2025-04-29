@@ -159,7 +159,6 @@ def download_model_huggingface(model_name, progress_callback=None):
             resume_download=True,
             max_workers=8,
             tqdm_class=None,
-            progress_callback=callback
         )
         print(f"Successfully downloaded {model_name}")
         return f"✅ Successfully downloaded {model_name}"
