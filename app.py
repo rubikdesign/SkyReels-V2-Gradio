@@ -304,6 +304,56 @@ def run_prompt_enhancer(prompt):
     except Exception as e:
         return f"Unexpected error: {str(e)}"
 
+
+# -- MISTRAL PROMPT ENHANCER FUNCTION -------------------------------------------
+def get_mistral_enhancer():
+    """Lazy-load the Mistral prompt enhancer model."""
+    try:
+        from transformers import pipeline
+        # Verifică dacă modelul există deja local
+        import os
+        model_path = os.path.join("models", "mistral-7b-instruct-v0.2")
+        if os.path.exists(model_path):
+            print(f"Loading Mistral model from local path: {model_path}")
+            model_source = model_path
+        else:
+            print("Downloading Mistral model from Hugging Face...")
+            model_source = "mistralai/Mistral-7B-Instruct-v0.2"
+        
+        return pipeline(
+            "text-generation",
+            model=model_source,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            max_new_tokens=256,
+        )
+    except Exception as e:
+        print(f"Error loading Mistral model: {str(e)}")
+        return None
+
+def enhance_prompt_with_mistral(text):
+    """Îmbunătățirea promptului folosind modelul Mistral-7B-Instruct-v0.2."""
+    try:
+        # Lazy-load modelul la prima utilizare
+        enhancer = get_mistral_enhancer()
+        if enhancer is None:
+            return "Error: Could not load Mistral model. Check console for details."
+        
+        system_msg = "Rewrite the prompt for high‑quality AI video; keep meaning, add cinematic detail, concise English."
+        prompt = f"<s>[INST] <<SYS>>{system_msg}<</SYS>>\n{text} [/INST]"
+        
+        resp = enhancer(prompt, temperature=0.7, top_p=0.9, max_new_tokens=160)[0]["generated_text"]
+        enhanced = resp.split("[/INST]")[-1].strip()
+        
+        # Verifică dacă rezultatul nu este gol
+        if not enhanced:
+            return text
+        return enhanced
+    except Exception as e:
+        print(f"Error enhancing prompt: {str(e)}")
+        return f"Error enhancing prompt: {str(e)}"
+
 # -- GENERATION FUNCTIONS -----------------------------------------------------
 
 def text_to_video_live(
@@ -622,6 +672,12 @@ def create_interface():
                             placeholder="Enter a detailed description of the video you want to generate...", 
                             label="Prompt"
                         )
+                        t2v_enhance_btn = gr.Button("Enhance with Mistral-7B", variant="secondary", size="sm")
+                        t2v_enhance_btn.click(
+                            fn=enhance_prompt_with_mistral,
+                            inputs=[t2v_prompt],
+                            outputs=[t2v_prompt]
+                        )
                         gr.Markdown("*A detailed prompt will lead to better results. Describe the scene, subjects, actions, and atmosphere.*", elem_classes=["info-text"])
                         
                         # Adăugăm negative prompt
@@ -799,6 +855,12 @@ def create_interface():
                             lines=3, 
                             placeholder="Describe how the image should animate into a video...", 
                             label="Prompt"
+                        )
+                        i2v_enhance_btn = gr.Button("Enhance with Mistral-7B", variant="secondary", size="sm")
+                        i2v_enhance_btn.click(
+                            fn=enhance_prompt_with_mistral,
+                            inputs=[i2v_prompt],
+                            outputs=[i2v_prompt]
                         )
                         gr.Markdown("*Describe the motion and action you want to see in the video*", elem_classes=["info-text"])
                         
