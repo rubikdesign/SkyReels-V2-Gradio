@@ -58,6 +58,13 @@ if __name__ == "__main__":
         type=str,
         default="A serene lake surrounded by towering mountains, with a few swans gracefully gliding across the water and sunlight dancing on the surface.",
     )
+    # Adăugat parametrul pentru negative_prompt
+    parser.add_argument(
+        "--negative_prompt",
+        type=str,
+        default="Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards",
+        help="Negative prompt to specify what you don't want in the video"
+    )
     parser.add_argument("--prompt_enhancer", action="store_true")
     parser.add_argument("--teacache", action="store_true")
     parser.add_argument(
@@ -105,7 +112,9 @@ if __name__ == "__main__":
         image = load_image(args.image).convert("RGB")
         logger.info("Image loaded successfully")
 
-    negative_prompt = "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
+    # Folosim negative_prompt din args în loc de hardcodat
+    negative_prompt = args.negative_prompt
+    
     local_rank = 0
     if args.use_usp:
         logger.info("Initializing USP mode for multi-GPU processing")
@@ -177,7 +186,9 @@ if __name__ == "__main__":
                                              ckpt_dir=args.model_id)
         logger.info(f"TEACache initialized with threshold={args.teacache_thresh}, use_ret_steps={args.use_ret_steps}")
         
-
+    # Afișăm și negative prompt în log
+    logger.info(f"Using negative prompt: {negative_prompt[:100]}...")
+    
     kwargs = {
         "prompt": prompt_input,
         "negative_prompt": negative_prompt,
