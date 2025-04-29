@@ -309,7 +309,6 @@ def run_prompt_enhancer(prompt):
 
 # -- MISTRAL PROMPT ENHANCER FUNCTION (IMPROVED v2) -------------------------------------------
 
-# Variabilă globală pentru pipeline, pentru a evita încărcarea repetată
 _mistral_pipe = None
 
 class TimeoutError(Exception):
@@ -330,7 +329,7 @@ def run_with_timeout(func, args=(), kwargs={}, timeout_seconds=60):
             error[0] = e
     
     thread = threading.Thread(target=target)
-    thread.daemon = True  # Thread-ul va fi terminat când programul principal se închide
+    thread.daemon = True  
     
     thread.start()
     thread.join(timeout_seconds)
@@ -345,7 +344,7 @@ def run_with_timeout(func, args=(), kwargs={}, timeout_seconds=60):
         
     return result[0], None
 
-def get_mistral_enhancer(nsfw_allowed=True, timeout_seconds=300):
+def get_mistral_enhancer(nsfw_allowed=False, timeout_seconds=300):
     """Lazy-load the Mistral prompt enhancer model with explicit NSFW handling.
     
     Args:
