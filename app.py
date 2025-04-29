@@ -157,7 +157,6 @@ def download_model_huggingface(model_name, progress_callback=None):
             repo_id=repo_id, 
             local_dir=local_dir, 
             resume_download=True,
-            progressbar=True,
             max_workers=8,
             tqdm_class=None,
             progress_callback=callback
