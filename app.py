@@ -680,7 +680,7 @@ def create_interface():
                             label="Prompt"
                         )
                         t2v_enhance_btn = gr.Button("Enhance with Mistral-7B", variant="secondary", size="sm")
-
+                        t2v_enhance_status = gr.Markdown("", elem_classes=["info-text"])
                         t2v_enhance_btn.click(
                             fn=enhance_prompt_with_mistral,
                             inputs=[t2v_prompt],
@@ -865,7 +865,7 @@ def create_interface():
                             label="Prompt"
                         )
                         i2v_enhance_btn = gr.Button("Enhance with Mistral-7B", variant="secondary", size="sm")
-                        
+                        i2v_enhance_status = gr.Markdown("", elem_classes=["info-text"])
                         i2v_enhance_btn.click(
                             fn=enhance_prompt_with_mistral,
                             inputs=[i2v_prompt],
