@@ -137,10 +137,29 @@ if __name__ == "__main__":
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
         logger.info(f"Setting CUDA_VISIBLE_DEVICES={args.gpu_ids}")
         
-        # Afișăm informații despre fiecare GPU
-        for gpu_id in range(torch.cuda.device_count()):
-            free_mem, total_mem = torch.cuda.mem_get_info(gpu_id)
-            logger.info(f"GPU {gpu_id}: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+        # Afișăm informații despre fiecare GPU specificat
+        total_memory = 0
+        free_memory = 0
+        logger.info(f"Checking memory for GPUs: {args.gpu_ids}")
+        
+        # Verificăm numărul de GPU-uri vizibile acum
+        num_gpus = torch.cuda.device_count()
+        logger.info(f"Number of visible GPUs: {num_gpus}")
+        
+        for device_idx in range(num_gpus):
+            try:
+                # Selectăm explicit dispozitivul curent
+                torch.cuda.set_device(device_idx)
+                free_mem, total_mem = torch.cuda.mem_get_info()
+                logger.info(f"GPU {device_idx}: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+                
+                # Calculăm totalul
+                total_memory += total_mem
+                free_memory += free_mem
+            except Exception as e:
+                logger.error(f"Error checking GPU {device_idx}: {e}")
+        
+        logger.info(f"Combined GPU memory: {free_memory/1024**3:.2f}GB free out of {total_memory/1024**3:.2f}GB total")
 
         # Inițializăm procesul de grup pentru procesare distribuită
         dist.init_process_group("nccl")
@@ -168,8 +187,9 @@ if __name__ == "__main__":
         torch.cuda.empty_cache()
 
     # GPU memory before loading the model
-    free_mem, total_mem = torch.cuda.mem_get_info()
-    logger.info(f"VRAM before loading model: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+    if torch.cuda.device_count() > 0:
+        free_mem, total_mem = torch.cuda.mem_get_info()
+        logger.info(f"VRAM before loading model (primary GPU): {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
 
     if image is None:
         assert "T2V" in args.model_id, f"check model_id:{args.model_id}"
@@ -197,8 +217,9 @@ if __name__ == "__main__":
         args.image = resizecrop(args.image, height, width)
 
     # GPU memory after loading the model
-    free_mem, total_mem = torch.cuda.mem_get_info()
-    logger.info(f"VRAM after loading model: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+    if torch.cuda.device_count() > 0:
+        free_mem, total_mem = torch.cuda.mem_get_info()
+        logger.info(f"VRAM after loading model (primary GPU): {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
 
     if args.teacache:
         logger.info("Initializing TEACache for accelerated inference...")
