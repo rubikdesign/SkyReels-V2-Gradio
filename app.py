@@ -92,14 +92,20 @@ def get_available_models():
         if base_name not in model_map:  # evită duplicatele
             model_map[base_name] = p
     
-    # Split into model types - include mai multe pattern-uri pentru siguranță
-    t2v_models = [m for m in model_map if any(x in m for x in ["-T2V-", "-DF-"])]
+    # Split into model types - allow DF models to be used for both T2V and I2V
+    t2v_models = [m for m in model_map if "-T2V-" in m]
     i2v_models = [m for m in model_map if "-I2V-" in m]
+    df_models = [m for m in model_map if "-DF-" in m]
+    
+    # Add DF models to both T2V and I2V lists
+    t2v_models.extend(df_models)
+    i2v_models.extend(df_models)
     
     # Afișează pentru debugging
     print(f"Found models: {list(model_map.keys())}")
     print(f"T2V models: {t2v_models}")
     print(f"I2V models: {i2v_models}")
+    print(f"DF models: {df_models}")
     
     return model_map, t2v_models, i2v_models
 
@@ -566,7 +572,9 @@ def text_to_video_live(
 def image_to_video_live(
     image, prompt, negative_prompt, model_name, resolution, aspect_ratio, num_frames, fps,
     guidance_scale, shift, steps, seed, offload, teacache, use_ret_steps, teacache_thresh, 
-    use_usp, cfg_rescale, prompt_enhancer, causal_attention
+    use_usp, cfg_rescale, prompt_enhancer, causal_attention,
+    # DF model parameters
+    ar_step=None, base_num_frames=None, overlap_history=None, addnoise_condition=None
 ):
     """Generate a video from an image input with live logs."""
     if not model_name:
@@ -581,21 +589,35 @@ def image_to_video_live(
     else:
         Image.fromarray(image).save(img_path)
 
+    # Check if it's a DF model
+    is_df = model_name.startswith("SkyReels-V2-DF-")
+    script = "generate_video_df.py" if is_df else "generate_video.py"
+    
+    # Clamp DF parameters so they never exceed num_frames
+    if is_df:
+        base_num_frames = min(base_num_frames or num_frames, num_frames)
+        overlap_history = min(overlap_history or 0, max(0, num_frames - 1))
+
     cmd = build_command(
-        "generate_video.py", os.path.join(MODEL_DIR, model_name),
+        script, os.path.join(MODEL_DIR, model_name),
         resolution, aspect_ratio, num_frames, fps, prompt,
         negative_prompt=negative_prompt if negative_prompt else None,
         # core args
         image=img_path,
-        guidance_scale=guidance_scale,
-        shift=shift,
+        guidance_scale=(None if is_df else guidance_scale),
+        shift=(None if is_df else shift),
         steps=steps,  # Acesta va fi mapat la inference_steps în build_command
         seed=seed,
-        teacache_thresh=teacache_thresh,
+        teacache_thresh=(teacache_thresh if not is_df else None),
+        # DF-only args
+        ar_step=(ar_step if is_df else None),
+        base_num_frames=(base_num_frames if is_df else None),
+        overlap_history=(overlap_history if is_df else None),
+        addnoise_condition=(addnoise_condition if is_df else None),
         # flags
         offload=offload,
-        teacache=teacache,
-        use_ret_steps=use_ret_steps,
+        teacache=(teacache if not is_df else None),
+        use_ret_steps=(use_ret_steps if not is_df else None),
         use_usp=use_usp,
         cfg_rescale=cfg_rescale,
         prompt_enhancer=prompt_enhancer,
@@ -1154,7 +1176,36 @@ def create_interface():
                                 value=False
                             )
                         gr.Markdown("*Advanced parameters that can improve visual quality in some cases*", elem_classes=["info-text"])
-                        
+
+                        with gr.Accordion("Diffusion Forcing Options", open=False):
+                            i2v_ar_step = gr.Number(
+                                label="AR Step", 
+                                value=0, 
+                                precision=0
+                            )
+                            gr.Markdown("*0 for synchronous, 5 for asynchronous generation*", elem_classes=["info-text"])
+                            
+                            i2v_base_nf = gr.Slider(
+                                16, 1800,
+                                label="Base Frames", 
+                                value=48
+                            )
+                            gr.Markdown("*Base frame count (reduce to save VRAM)*", elem_classes=["info-text"])
+                            
+                            i2v_overlap = gr.Slider(
+                                0, 60, 
+                                label="Overlap History", 
+                                value=17
+                            )
+                            gr.Markdown("*Overlap frames for long videos (17 or 37 recommended)*", elem_classes=["info-text"])
+                            
+                            i2v_noise_c = gr.Slider(
+                                0, 60, 
+                                label="Noise Condition", 
+                                value=20
+                            )
+                            gr.Markdown("*Smooths long videos (20 recommended, max 50)*", elem_classes=["info-text"])
+                                                
                         i2v_button = gr.Button("Generate Video", variant="primary")
                     
                     with gr.Column(scale=2):
@@ -1271,7 +1322,9 @@ def create_interface():
                 i2v_image, i2v_prompt, i2v_negative_prompt, i2v_model, i2v_resolution, i2v_aspect, i2v_num, i2v_fps,
                 i2v_guidance, i2v_shift, i2v_steps, i2v_seed, i2v_offload, i2v_teacache,
                 i2v_ret, i2v_tc_thresh, i2v_use_usp, i2v_cfg_rescale, i2v_prompt_enhancer,
-                i2v_causal_attention
+                i2v_causal_attention,
+                # DF model parameters
+                i2v_ar_step, i2v_base_nf, i2v_overlap, i2v_noise_c
             ],
             outputs=[i2v_output, i2v_logs],
             show_progress=True
