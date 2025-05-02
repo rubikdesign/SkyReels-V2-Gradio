@@ -984,6 +984,20 @@ def create_interface():
                                 value=False
                             )
                         gr.Markdown("*Advanced parameters that can improve visual quality in some cases*", elem_classes=["info-text"])
+
+
+
+                        with gr.Accordion("Multi-GPU Options", open=False):
+                            t2v_use_multi_gpu = gr.Checkbox(
+                                label="Enable Multi-GPU", 
+                                value=False
+                            )
+                            t2v_gpu_devices = gr.Textbox(
+                                label="GPU Device IDs (comma-separated, e.g. '0,1')",
+                                value="0,1"
+                            )
+                            gr.Markdown("*Specify which GPUs to use (e.g. '0,1' for the first two GPUs)*", elem_classes=["info-text"])
+                        
                         
                         with gr.Accordion("Diffusion Forcing Options", open=False):
                             t2v_ar_step = gr.Number(
@@ -1188,17 +1202,17 @@ def create_interface():
 
                         # Add Multi-GPU Options here
                         with gr.Accordion("Multi-GPU Options", open=False):
-                            t2v_use_multi_gpu = gr.Checkbox(
+                            i2v_use_multi_gpu = gr.Checkbox(
                                 label="Enable Multi-GPU", 
                                 value=False
                             )
-                            t2v_gpu_devices = gr.Textbox(
+                            i2v_gpu_devices = gr.Textbox(
                                 label="GPU Device IDs (comma-separated, e.g. '0,1')",
                                 value="0,1"
                             )
                             gr.Markdown("*Specify which GPUs to use (e.g. '0,1' for the first two GPUs)*", elem_classes=["info-text"])
 
-                                                
+
 
                         with gr.Accordion("Diffusion Forcing Options", open=False):
                             i2v_ar_step = gr.Number(
