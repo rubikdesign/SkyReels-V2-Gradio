@@ -231,6 +231,28 @@ FLAG_ONLY_ARGS = {
     "cfg_rescale"
 }
 
+# IMPROVED MULTI-GPU SETUP - Helper function to initialize GPU devices
+def initialize_gpus(gpu_ids_str):
+    """Explicitly initialize all GPUs to ensure they're recognized"""
+    # Parse GPU IDs
+    gpu_ids = [int(id.strip()) for id in gpu_ids_str.split(",") if id.strip()]
+    if not gpu_ids:
+        gpu_ids = [0]  # Default to GPU 0 if none specified
+    
+    print(f"Initializing GPUs: {gpu_ids}")
+    
+    # Explicitly initialize each GPU
+    for i, gpu_id in enumerate(gpu_ids):
+        try:
+            device = torch.device(f'cuda:{i}')
+            # Create a small tensor on this device to initialize it
+            tensor = torch.zeros(1, device=device)
+            print(f"Successfully initialized GPU {i} (ID: {gpu_id})")
+        except Exception as e:
+            print(f"Error initializing GPU {i} (ID: {gpu_id}): {str(e)}")
+    
+    return gpu_ids
+
 def build_command(script, model_path, resolution, aspect_ratio, num_frames, fps, prompt, negative_prompt=None, **kwargs):
     """Build a subprocess command list with resolution and aspect ratio support."""
     # Get width and height based on aspect ratio
@@ -246,13 +268,16 @@ def build_command(script, model_path, resolution, aspect_ratio, num_frames, fps,
         "--outdir", "video_out"
     ]
 
-        # Add multi-GPU specific params
-    if "use_multi_gpu" in kwargs and kwargs["use_multi_gpu"]:
-        gpu_ids = kwargs.get("gpu_devices", "0,1")
-        cmd.extend(["--gpu_ids", gpu_ids])
+    # Special handling for multi-GPU parameters
+    use_multi_gpu = kwargs.pop("use_multi_gpu", False)
+    gpu_devices = kwargs.pop("gpu_devices", "0,1")
+    
+    # Add multi-GPU specific params
+    if use_multi_gpu:
+        cmd.extend(["--gpu_ids", gpu_devices])
         # Always enable USP for multi-GPU
         if "--use_usp" not in cmd:
-            cmd.append("--use_usp")
+            kwargs["use_usp"] = True
             
     # Add negative prompt if provided
     if negative_prompt:
@@ -279,9 +304,20 @@ def run_and_yield_logs(cmd):
     Run a command and yield its output line by line in real-time.
     This allows us to display live logs in the Gradio interface.
     """
+    # Modified to add environment variables for better CUDA visibility
+    env = os.environ.copy()
+    
+    # Ensure NCCL_DEBUG is set to INFO for better distributed training logs
+    env["NCCL_DEBUG"] = "INFO"
+    
+    # Add environment variables to improve multi-GPU performance
+    env["NCCL_P2P_DISABLE"] = "0"
+    env["NCCL_IB_DISABLE"] = "0"
+    
+    # Launch the process with the enhanced environment
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        universal_newlines=True, bufsize=1
+        universal_newlines=True, bufsize=1, env=env
     )
     for line in iter(proc.stdout.readline, ""):
         yield line.rstrip()
@@ -514,26 +550,14 @@ def enhance_prompt_with_mistral(text):
         print(f"Error enhancing prompt: {str(e)}")
         yield text, f"❌ Error enhancing prompt: {str(e)}"
 
-# Exemplu de utilizare (comentat, de decomenteat pentru testare):
-"""
-if __name__ == "__main__":
-    test_prompt = "A futuristic city with flying cars"
-    generator = enhance_prompt_with_mistral(test_prompt)
-    
-    # Afișează fiecare stare intermediară
-    for prompt, status in generator:
-        print(f"Status: {status}")
-        print(f"Current prompt: {prompt}")
-        print("-" * 50)
-"""
-
 # -- GENERATION FUNCTIONS -----------------------------------------------------
 
 def text_to_video_live(
     prompt, negative_prompt, model_name, resolution, aspect_ratio, num_frames, fps,
     guidance_scale, shift, steps, seed, offload, use_usp, cfg_rescale,
     prompt_enhancer, causal_attention,
-    ar_step=None, base_num_frames=None, overlap_history=None, addnoise_condition=None
+    ar_step=None, base_num_frames=None, overlap_history=None, addnoise_condition=None,
+    use_multi_gpu=False, gpu_devices="0,1"  # Added multi-GPU parameters
 ):
     """Generate a video from text input with live logs."""
     if not model_name:
@@ -542,6 +566,18 @@ def text_to_video_live(
     model_path = os.path.join(MODEL_DIR, model_name)
     is_df = model_name.startswith("SkyReels-V2-DF-")
     script = "generate_video_df.py" if is_df else "generate_video.py"
+
+    # Initialize GPUs if multi-GPU is enabled
+    if use_multi_gpu:
+        yield None, "Initializing multi-GPU setup...\n"
+        initialize_gpus(gpu_devices)
+        # Set environment variables for better NCCL performance
+        os.environ["NCCL_DEBUG"] = "INFO"
+        os.environ["NCCL_P2P_DISABLE"] = "0"
+        os.environ["NCCL_IB_DISABLE"] = "0"
+        # Force Tensor Parallelism mode by setting USP to True
+        use_usp = True
+        yield None, f"Multi-GPU initialized with devices: {gpu_devices}\n"
 
     # Clamp DF parameters so they never exceed num_frames
     if is_df:
@@ -566,7 +602,10 @@ def text_to_video_live(
         use_usp=use_usp,
         cfg_rescale=cfg_rescale,
         prompt_enhancer=prompt_enhancer,
-        causal_attention=causal_attention
+        causal_attention=causal_attention,
+        # Multi-GPU parameters
+        use_multi_gpu=use_multi_gpu,
+        gpu_devices=gpu_devices
     )
 
     logs = ""
@@ -582,7 +621,9 @@ def image_to_video_live(
     guidance_scale, shift, steps, seed, offload, teacache, use_ret_steps, teacache_thresh, 
     use_usp, cfg_rescale, prompt_enhancer, causal_attention,
     # DF model parameters
-    ar_step=None, base_num_frames=None, overlap_history=None, addnoise_condition=None
+    ar_step=None, base_num_frames=None, overlap_history=None, addnoise_condition=None,
+    # Added multi-GPU parameters
+    use_multi_gpu=False, gpu_devices="0,1"
 ):
     """Generate a video from an image input with live logs."""
     if not model_name:
@@ -596,6 +637,18 @@ def image_to_video_live(
         image.save(img_path)
     else:
         Image.fromarray(image).save(img_path)
+
+    # Initialize GPUs if multi-GPU is enabled
+    if use_multi_gpu:
+        yield None, "Initializing multi-GPU setup...\n"
+        initialize_gpus(gpu_devices)
+        # Set environment variables for better NCCL performance
+        os.environ["NCCL_DEBUG"] = "INFO"
+        os.environ["NCCL_P2P_DISABLE"] = "0"
+        os.environ["NCCL_IB_DISABLE"] = "0"
+        # Force Tensor Parallelism mode by setting USP to True
+        use_usp = True
+        yield None, f"Multi-GPU initialized with devices: {gpu_devices}\n"
 
     # Check if it's a DF model
     is_df = model_name.startswith("SkyReels-V2-DF-")
@@ -629,7 +682,10 @@ def image_to_video_live(
         use_usp=use_usp,
         cfg_rescale=cfg_rescale,
         prompt_enhancer=prompt_enhancer,
-        causal_attention=causal_attention
+        causal_attention=causal_attention,
+        # Multi-GPU parameters
+        use_multi_gpu=use_multi_gpu,
+        gpu_devices=gpu_devices
     )
 
     logs = ""
@@ -792,6 +848,14 @@ def create_interface():
             font-size: 0.9em;
             margin: 5px 0;
             border-left: 2px solid #1f77b4;
+        }
+        .multi-gpu-info {
+            background-color: #e9f7fe;
+            border-left: 4px solid #007bff;
+            padding: 10px 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+            font-weight: bold;
         }
     """) as demo:
         with gr.Row(elem_classes=["header-gradient"]):
@@ -985,19 +1049,40 @@ def create_interface():
                             )
                         gr.Markdown("*Advanced parameters that can improve visual quality in some cases*", elem_classes=["info-text"])
 
-
-
-                        with gr.Accordion("Multi-GPU Options", open=False):
+                        # IMPROVED MULTI-GPU OPTIONS
+                        with gr.Accordion("Multi-GPU Options", open=True):
                             t2v_use_multi_gpu = gr.Checkbox(
                                 label="Enable Multi-GPU", 
-                                value=False
+                                value=True  # Changed default to True
                             )
                             t2v_gpu_devices = gr.Textbox(
                                 label="GPU Device IDs (comma-separated, e.g. '0,1')",
                                 value="0,1"
                             )
-                            gr.Markdown("*Specify which GPUs to use (e.g. '0,1' for the first two GPUs)*", elem_classes=["info-text"])
-                        
+                            gr.Markdown("**IMPORTANT: Multi-GPU works best with Tensor Parallelism. When enabled, this will force USP mode ON and distribute the workload across GPUs.**", elem_classes=["multi-gpu-info"])
+                            
+                            # Add function to detect and display available GPUs
+                            def detect_gpus():
+                                if not torch.cuda.is_available():
+                                    return "No CUDA devices detected. Multi-GPU will not work."
+                                
+                                num_gpus = torch.cuda.device_count()
+                                gpu_info = f"Detected {num_gpus} CUDA devices:\n"
+                                
+                                for i in range(num_gpus):
+                                    props = torch.cuda.get_device_properties(i)
+                                    memory_gb = props.total_memory / (1024**3)
+                                    gpu_info += f"- GPU {i}: {props.name}, {memory_gb:.1f}GB VRAM\n"
+                                
+                                return gpu_info
+                            
+                            t2v_detect_gpus_btn = gr.Button("Detect Available GPUs", variant="secondary", size="sm")
+                            t2v_gpu_info = gr.Markdown("")
+                            t2v_detect_gpus_btn.click(
+                                fn=detect_gpus,
+                                inputs=[],
+                                outputs=[t2v_gpu_info]
+                            )
                         
                         with gr.Accordion("Diffusion Forcing Options", open=False):
                             t2v_ar_step = gr.Number(
@@ -1199,20 +1284,26 @@ def create_interface():
                             )
                         gr.Markdown("*Advanced parameters that can improve visual quality in some cases*", elem_classes=["info-text"])
 
-
-                        # Add Multi-GPU Options here
-                        with gr.Accordion("Multi-GPU Options", open=False):
+                        # IMPROVED MULTI-GPU OPTIONS
+                        with gr.Accordion("Multi-GPU Options", open=True):
                             i2v_use_multi_gpu = gr.Checkbox(
                                 label="Enable Multi-GPU", 
-                                value=False
+                                value=True  # Changed default to True
                             )
                             i2v_gpu_devices = gr.Textbox(
                                 label="GPU Device IDs (comma-separated, e.g. '0,1')",
                                 value="0,1"
                             )
-                            gr.Markdown("*Specify which GPUs to use (e.g. '0,1' for the first two GPUs)*", elem_classes=["info-text"])
-
-
+                            gr.Markdown("**IMPORTANT: Multi-GPU works best with Tensor Parallelism. When enabled, this will force USP mode ON and distribute the workload across GPUs.**", elem_classes=["multi-gpu-info"])
+                            
+                            # Add function to detect and display available GPUs
+                            i2v_detect_gpus_btn = gr.Button("Detect Available GPUs", variant="secondary", size="sm")
+                            i2v_gpu_info = gr.Markdown("")
+                            i2v_detect_gpus_btn.click(
+                                fn=detect_gpus,
+                                inputs=[],
+                                outputs=[i2v_gpu_info]
+                            )
 
                         with gr.Accordion("Diffusion Forcing Options", open=False):
                             i2v_ar_step = gr.Number(
@@ -1249,7 +1340,7 @@ def create_interface():
                         i2v_output = gr.Video(label="Generated Video")
                         i2v_logs = gr.Textbox(label="Live Logs", lines=15, interactive=False)
             
-            # Help tab with documentation
+# Help tab with documentation
             with gr.TabItem("Help & Tips", id="help-tips"):
                 gr.Markdown("""
                 # SkyReels-V2 Generator Help
@@ -1287,6 +1378,14 @@ def create_interface():
                 - **Overlap History**: Use 17 or 37 for long videos.
                 - **Noise Condition**: Set to 20 for smoother long videos (max 50).
                 
+                ## Multi-GPU Features
+                
+                - **Enable Multi-GPU**: When checked, processing is distributed across multiple GPUs
+                - **GPU Device IDs**: Comma-separated list of GPU IDs to use (e.g., "0,1" for the first two GPUs)
+                - Multi-GPU mode works best with USP (Ulysses Parallel) enabled
+                - For best results, use GPU cards with similar performance and memory capacity
+                - Monitor GPU utilization to ensure proper load balancing
+                
                 ## Long Video Generation Tips
                 
                 - For videos longer than 30 seconds, use Diffusion Forcing (DF) models
@@ -1316,6 +1415,7 @@ def create_interface():
                 5. If your GPU has sufficient VRAM, use higher resolution and step counts
                 6. For Image-to-Video, use clear images with good lighting and framing
                 7. Use the Prompt Enhancer tab to create more detailed prompts from simple ideas
+                8. For multi-GPU processing, enable Multi-GPU and USP mode together
                 """)
         
         # Function to refresh available models
@@ -1347,7 +1447,8 @@ def create_interface():
                 t2v_prompt, t2v_negative_prompt, t2v_model, t2v_resolution, t2v_aspect, t2v_num, t2v_fps,
                 t2v_guidance, t2v_shift, t2v_steps, t2v_seed, t2v_offload, t2v_use_usp,
                 t2v_cfg_rescale, t2v_prompt_enhancer, t2v_causal_attention,
-                t2v_ar_step, t2v_base_nf, t2v_overlap, t2v_noise_c
+                t2v_ar_step, t2v_base_nf, t2v_overlap, t2v_noise_c,
+                t2v_use_multi_gpu, t2v_gpu_devices  # Added multi-GPU parameters
             ],
             outputs=[t2v_output, t2v_logs],
             show_progress=True
@@ -1361,7 +1462,9 @@ def create_interface():
                 i2v_ret, i2v_tc_thresh, i2v_use_usp, i2v_cfg_rescale, i2v_prompt_enhancer,
                 i2v_causal_attention,
                 # DF model parameters
-                i2v_ar_step, i2v_base_nf, i2v_overlap, i2v_noise_c
+                i2v_ar_step, i2v_base_nf, i2v_overlap, i2v_noise_c,
+                # Multi-GPU parameters
+                i2v_use_multi_gpu, i2v_gpu_devices
             ],
             outputs=[i2v_output, i2v_logs],
             show_progress=True
@@ -1372,6 +1475,26 @@ def create_interface():
 if __name__ == "__main__":
     # Asigură-te că directorul pentru modele există
     os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    # Set better NCCL environment variables for distributed training
+    os.environ["NCCL_DEBUG"] = "INFO"
+    os.environ["NCCL_P2P_DISABLE"] = "0"
+    os.environ["NCCL_IB_DISABLE"] = "0"
+    
+    # For better multi-GPU performance
+    if torch.cuda.is_available():
+        # Print CUDA info
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"Number of available GPUs: {torch.cuda.device_count()}")
+        
+        # Print info for each GPU
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            print(f"GPU {i}: {props.name}, {props.total_memory / (1024**3):.1f}GB VRAM")
+        
+        # Initialize CUDA for better multi-GPU performance
+        torch.cuda.init()
     
     demo = create_interface()
     demo.queue()
