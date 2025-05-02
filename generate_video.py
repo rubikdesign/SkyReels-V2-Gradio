@@ -76,6 +76,12 @@ if __name__ == "__main__":
         "--use_ret_steps",
         action="store_true",
         help="Using Retention Steps will result in faster generation speed and better generation quality.")
+    # Adăugăm parametrii pentru multi-GPU
+    parser.add_argument(
+        "--gpu_ids",
+        type=str,
+        default="0",
+        help="Comma-separated list of GPU IDs to use for multi-GPU processing (e.g. '0,1')")
     args = parser.parse_args()
     
     logger.info(f"Configuration: Resolution={args.resolution}, Frames={args.num_frames}, Steps={args.inference_steps}")
@@ -122,9 +128,24 @@ if __name__ == "__main__":
         from xfuser.core.distributed import initialize_model_parallel, init_distributed_environment
         import torch.distributed as dist
 
+        # Procesăm lista de GPU IDs
+        gpu_ids = [int(id.strip()) for id in args.gpu_ids.split(",") if id.strip()]
+        if not gpu_ids:
+            gpu_ids = [0]  # Implicit folosim GPU 0
+        
+        # Setăm variabilele de mediu pentru a restricționa dispozitivele CUDA vizibile
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
+        logger.info(f"Setting CUDA_VISIBLE_DEVICES={args.gpu_ids}")
+        
+        # Afișăm informații despre fiecare GPU
+        for gpu_id in range(torch.cuda.device_count()):
+            free_mem, total_mem = torch.cuda.mem_get_info(gpu_id)
+            logger.info(f"GPU {gpu_id}: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+
+        # Inițializăm procesul de grup pentru procesare distribuită
         dist.init_process_group("nccl")
         local_rank = dist.get_rank()
-        torch.cuda.set_device(dist.get_rank())
+        torch.cuda.set_device(local_rank)
         device = "cuda"
 
         init_distributed_environment(rank=dist.get_rank(), world_size=dist.get_world_size())
@@ -134,7 +155,7 @@ if __name__ == "__main__":
             ring_degree=1,
             ulysses_degree=dist.get_world_size(),
         )
-        logger.info(f"USP initialized with rank {local_rank}, world_size {dist.get_world_size()}")
+        logger.info(f"USP initialized with rank {local_rank}, world_size {dist.get_world_size()}, using GPUs: {args.gpu_ids}")
 
     prompt_input = args.prompt
     if args.prompt_enhancer and args.image is None:
