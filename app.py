@@ -245,7 +245,15 @@ def build_command(script, model_path, resolution, aspect_ratio, num_frames, fps,
         "--prompt", prompt,
         "--outdir", "video_out"
     ]
-    
+
+        # Add multi-GPU specific params
+    if "use_multi_gpu" in kwargs and kwargs["use_multi_gpu"]:
+        gpu_ids = kwargs.get("gpu_devices", "0,1")
+        cmd.extend(["--gpu_ids", gpu_ids])
+        # Always enable USP for multi-GPU
+        if "--use_usp" not in cmd:
+            cmd.append("--use_usp")
+            
     # Add negative prompt if provided
     if negative_prompt:
         cmd.extend(["--negative_prompt", negative_prompt])
