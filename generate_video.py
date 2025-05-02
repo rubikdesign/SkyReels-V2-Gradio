@@ -161,9 +161,20 @@ if __name__ == "__main__":
         
         logger.info(f"Combined GPU memory: {free_memory/1024**3:.2f}GB free out of {total_memory/1024**3:.2f}GB total")
 
+        # Setăm variabilele de mediu necesare pentru inițializarea distribuită
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12355"
+        os.environ["RANK"] = "0"
+        os.environ["WORLD_SIZE"] = str(len(gpu_ids))
+
         # Inițializăm procesul de grup pentru procesare distribuită
-        dist.init_process_group("nccl")
-        local_rank = dist.get_rank()
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=len(gpu_ids),
+            rank=0
+        )
+        local_rank = 0  # Pentru simplitate, când rulăm pe un singur nod, rangul este întotdeauna 0
         torch.cuda.set_device(local_rank)
         device = "cuda"
 
@@ -208,7 +219,8 @@ if __name__ == "__main__":
         args.image = load_image(args.image)
         image_width, image_height = args.image.size
         
-        # Only do auto-swap if custom dimensions weren't provided
+        # Only
+# Only do auto-swap if custom dimensions weren't provided
         if args.width is None and args.height is None and image_height > image_width:
             logger.info(f"Portrait image detected, swapping dimensions")
             height, width = width, height
