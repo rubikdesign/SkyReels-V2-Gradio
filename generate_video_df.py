@@ -50,7 +50,7 @@ if __name__ == "__main__":
         type=str,
         default="A woman in a leather jacket and sunglasses riding a vintage motorcycle through a desert highway at sunset, her hair blowing wildly in the wind as the motorcycle kicks up dust, with the golden sun casting long shadows across the barren landscape.",
     )
-    # Added negative_prompt parameter
+    # Adăugat parametrul pentru negative_prompt
     parser.add_argument(
         "--negative_prompt",
         type=str,
@@ -69,6 +69,13 @@ if __name__ == "__main__":
         "--use_ret_steps",
         action="store_true",
         help="Using Retention Steps will result in faster generation speed and better generation quality.",
+    )
+    # Adăugăm parametrii pentru multi-GPU
+    parser.add_argument(
+        "--gpu_ids",
+        type=str,
+        default="0",
+        help="Comma-separated list of GPU IDs to use for multi-GPU processing (e.g. '0,1')"
     )
     args = parser.parse_args()
 
@@ -117,6 +124,10 @@ if __name__ == "__main__":
     elif args.addnoise_condition > 0:
         logger.info(f"Using addnoise_condition={args.addnoise_condition} for smoother long video generation")
 
+    # Folosim negative_prompt din args
+    negative_prompt = args.negative_prompt
+    logger.info(f"Using negative prompt: {negative_prompt[:100]}...")
+
     guidance_scale = args.guidance_scale
     shift = args.shift
     if args.image:
@@ -134,10 +145,6 @@ if __name__ == "__main__":
         logger.info("Image loaded and processed successfully")
     
     image = args.image.convert("RGB") if args.image else None
-    
-    # Use negative_prompt from args instead of hardcoded value
-    negative_prompt = args.negative_prompt
-    logger.info(f"Using negative prompt: {negative_prompt[:100]}...")
 
     save_dir = os.path.join("result", args.outdir)
     os.makedirs(save_dir, exist_ok=True)
@@ -152,9 +159,24 @@ if __name__ == "__main__":
         from xfuser.core.distributed import initialize_model_parallel, init_distributed_environment
         import torch.distributed as dist
 
+        # Procesăm lista de GPU IDs
+        gpu_ids = [int(id.strip()) for id in args.gpu_ids.split(",") if id.strip()]
+        if not gpu_ids:
+            gpu_ids = [0]  # Implicit folosim GPU 0
+        
+        # Setăm variabilele de mediu pentru a restricționa dispozitivele CUDA vizibile
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
+        logger.info(f"Setting CUDA_VISIBLE_DEVICES={args.gpu_ids}")
+        
+        # Afișăm informații despre fiecare GPU
+        for gpu_id in range(torch.cuda.device_count()):
+            free_mem, total_mem = torch.cuda.mem_get_info(gpu_id)
+            logger.info(f"GPU {gpu_id}: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+
+        # Inițializăm procesul de grup pentru procesare distribuită
         dist.init_process_group("nccl")
         local_rank = dist.get_rank()
-        torch.cuda.set_device(dist.get_rank())
+        torch.cuda.set_device(local_rank)
         device = "cuda"
 
         init_distributed_environment(rank=dist.get_rank(), world_size=dist.get_world_size())
@@ -164,7 +186,7 @@ if __name__ == "__main__":
             ring_degree=1,
             ulysses_degree=dist.get_world_size(),
         )
-        logger.info(f"USP initialized with rank {local_rank}, world_size {dist.get_world_size()}")
+        logger.info(f"USP initialized with rank {local_rank}, world_size {dist.get_world_size()}, using GPUs: {args.gpu_ids}")
 
     prompt_input = args.prompt
     if args.prompt_enhancer and args.image is None:
@@ -288,15 +310,15 @@ if __name__ == "__main__":
     logger.info(f"Video generation completed in {generation_time:.2f} seconds")
 
     if local_rank == 0:
-        logger.info("Saving result video...")
-        current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-        video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{current_time}.mp4"
-        output_path = os.path.join(save_dir, video_out_file)
+            logger.info("Saving result video...")
+            current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+            video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{current_time}.mp4"
+            output_path = os.path.join(save_dir, video_out_file)
+            
+            logger.info(f"Writing video with {len(video_frames)} frames at {fps} FPS...")
+            imageio.mimwrite(output_path, video_frames, fps=fps, quality=8, output_params=["-loglevel", "error"])
+            logger.info(f"Video saved at: {output_path}")
         
-        logger.info(f"Writing video with {len(video_frames)} frames at {fps} FPS...")
-        imageio.mimwrite(output_path, video_frames, fps=fps, quality=8, output_params=["-loglevel", "error"])
-        logger.info(f"Video saved at: {output_path}")
-    
-    total_time = time.time() - start_time
-    logger.info(f"Complete process took {total_time:.2f} seconds")
-    logger.info(f"Generation statistics: {num_frames} frames, {generation_time:.2f} seconds, {num_frames/generation_time:.2f} frames/second")
+        total_time = time.time() - start_time
+        logger.info(f"Complete process took {total_time:.2f} seconds")
+        logger.info(f"Generation statistics: {num_frames} frames, {generation_time:.2f} seconds, {num_frames/generation_time:.2f} frames/second")
