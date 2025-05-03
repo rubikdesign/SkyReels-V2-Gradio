@@ -6,7 +6,8 @@ import time
 import logging
 import multiprocessing
 import json
-from typing import Dict, List
+import datetime  # Adăugat importul pentru datetime
+from typing import Dict, List, Any
 
 import imageio
 import torch
@@ -27,14 +28,23 @@ logger = logging.getLogger(__name__)
 # This is critical for CUDA + multiprocessing
 multiprocessing.set_start_method('spawn', force=True)
 
-def process_chunk(gpu_id: int, model_path: str, params: Dict, result_queue):
+def process_video_on_gpu(gpu_id: int, model_path: str, params: Dict[str, Any], result_queue):
     """
-    Procesează un chunk de cadre pe un GPU specific
+    Procesează întregul video pe un GPU, dar doar o parte din cadre vor fi păstrate
+    Această abordare evită problemele de index out of bounds
     """
     try:
         # Setăm dispozitivul corect pentru acest proces
         torch.cuda.set_device(gpu_id)
         logger.info(f"[GPU {gpu_id}] Process started, initializing model...")
+        
+        # Recuperăm informațiile despre cadre pentru acest GPU
+        # Acum vom procesa toate cadrele, dar vom păstra doar cele care ne interesează
+        start_frame = params.get("gpu_start_frames", {}).get(str(gpu_id), 0)
+        end_frame = params.get("gpu_end_frames", {}).get(str(gpu_id), params.get("num_frames", 97))
+        total_frames = params.get("num_frames", 97)  # Totul cadrelor din video
+        
+        logger.info(f"[GPU {gpu_id}] Will generate all {total_frames} frames, but keep only frames {start_frame} to {end_frame-1}")
         
         # Creăm pipeline-ul pentru acest GPU
         pipe = DiffusionForcingPipeline(
@@ -63,13 +73,6 @@ def process_chunk(gpu_id: int, model_path: str, params: Dict, result_queue):
                 ckpt_dir=model_path,
             )
         
-        # Calculăm intervalul de cadre pentru acest GPU
-        start_frame = params.get("gpu_start_frames", {}).get(str(gpu_id), 0)
-        end_frame = params.get("gpu_end_frames", {}).get(str(gpu_id), params.get("num_frames", 97))
-        frames_to_process = end_frame - start_frame
-        
-        logger.info(f"[GPU {gpu_id}] Processing frames {start_frame} to {end_frame-1} (total: {frames_to_process} frames)")
-        
         # Adaptăm parametrii pentru acest chunk
         local_params = {
             "prompt": params.get("prompt", ""),
@@ -77,14 +80,14 @@ def process_chunk(gpu_id: int, model_path: str, params: Dict, result_queue):
             "image": params.get("image", None),
             "height": params.get("height", 544),
             "width": params.get("width", 960),
-            "num_frames": frames_to_process,
+            "num_frames": total_frames,  # Generăm toate cadrele
             "num_inference_steps": params.get("num_inference_steps", 30),
             "shift": params.get("shift", 8.0),
             "guidance_scale": params.get("guidance_scale", 6.0),
             "generator": torch.Generator(device=f"cuda:{gpu_id}").manual_seed(params.get("seed", 0)),
             "overlap_history": params.get("overlap_history", None),
             "addnoise_condition": params.get("addnoise_condition", 0),
-            "base_num_frames": params.get("base_num_frames", frames_to_process),
+            "base_num_frames": params.get("base_num_frames", total_frames),
             "ar_step": params.get("ar_step", 0),
             "causal_block_size": params.get("causal_block_size", 1),
             "fps": params.get("fps", 24),
@@ -96,18 +99,20 @@ def process_chunk(gpu_id: int, model_path: str, params: Dict, result_queue):
             del local_params["seed"]
         
         # Generăm cadrele
-        logger.info(f"[GPU {gpu_id}] Starting generation...")
+        logger.info(f"[GPU {gpu_id}] Starting generation of all frames...")
         with torch.amp.autocast('cuda', dtype=pipe.transformer.dtype), torch.no_grad():
             video_frames = pipe(**local_params)[0]
         
-        logger.info(f"[GPU {gpu_id}] Generated {len(video_frames)} frames successfully")
+        # Selectăm doar cadrele care ne interesează
+        selected_frames = video_frames[start_frame:end_frame]
+        logger.info(f"[GPU {gpu_id}] Generated all frames, selected {len(selected_frames)} frames ({start_frame} to {end_frame-1})")
         
         # Punem rezultatele în coadă, inclusiv informațiile de ordonare
         result_queue.put({
             "gpu_id": gpu_id,
             "start_frame": start_frame,
             "end_frame": end_frame,
-            "frames": video_frames
+            "frames": selected_frames
         })
         
         # Eliberăm memoria
@@ -127,9 +132,10 @@ def process_chunk(gpu_id: int, model_path: str, params: Dict, result_queue):
         })
         return False
 
-def generate_multi_gpu_threading(model_path: str, params: Dict, gpu_ids: List[int]):
+def generate_multi_gpu_complete(model_path: str, params: Dict[str, Any], gpu_ids: List[int]):
     """
-    Generează un video folosind mai multe GPU-uri cu threads în loc de procese separate
+    Generează un video folosind mai multe GPU-uri paralel
+    Fiecare GPU generează întregul video, dar păstrează doar o parte din cadre
     """
     # Calculăm câte cadre va procesa fiecare GPU
     num_gpus = len(gpu_ids)
@@ -166,7 +172,7 @@ def generate_multi_gpu_threading(model_path: str, params: Dict, gpu_ids: List[in
     processes = []
     for gpu_id in gpu_ids:
         p = multiprocessing.Process(
-            target=process_chunk,
+            target=process_video_on_gpu,
             args=(gpu_id, model_path, params_copy, result_queue)
         )
         processes.append(p)
@@ -395,15 +401,23 @@ if __name__ == "__main__":
     logger.info(f"Starting video generation with {num_frames} frames across {len(gpu_ids)} GPUs...")
     generation_start = time.time()
     
-    # Utilizăm multiple GPU-uri
-    if len(gpu_ids) > 1:
+    # Utilizăm multiple GPU-uri dacă avem un număr mic de cadre
+    # Pentru număr mare de cadre (>100), folosim doar un singur GPU
+    # Acest lucru evită problemele cu index out of bounds
+    if len(gpu_ids) > 1 and num_frames <= 100:
         logger.info(f"Using custom multi-GPU approach with {len(gpu_ids)} GPUs")
         try:
-            video_frames = generate_multi_gpu_threading(args.model_id, generation_params, gpu_ids)
+            # Folosim metoda completă de generare, fiecare GPU generează tot video-ul
+            # dar păstrează doar o parte din cadre
+            video_frames = generate_multi_gpu_complete(args.model_id, generation_params, gpu_ids)
         except Exception as e:
             logger.error(f"Multi-GPU processing failed: {str(e)}")
             logger.warning("Falling back to single GPU mode")
             gpu_ids = [gpu_ids[0]]  # Folosim doar primul GPU
+    else:
+        if len(gpu_ids) > 1:
+            logger.info(f"Too many frames ({num_frames}) for multi-GPU approach, falling back to single GPU")
+        gpu_ids = [gpu_ids[0]]
     
     # Dacă avem doar un GPU sau multi-GPU a eșuat
     if len(gpu_ids) == 1:
