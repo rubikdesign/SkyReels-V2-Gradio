@@ -4,8 +4,13 @@ import os
 import random
 import time
 import logging
+import multiprocessing
+import threading
+import queue
+import json
 
 import imageio
+import numpy as np
 import torch
 from diffusers.utils import load_image
 
@@ -19,6 +24,167 @@ logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(levelname)s - %(message)s',
                    datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
+
+# IMPORTANT: Configure spawn method for multiprocessing
+# This is critical for CUDA + multiprocessing
+multiprocessing.set_start_method('spawn', force=True)
+
+def process_chunk(gpu_id, model_path, params, result_queue):
+    """
+    Procesează un chunk de cadre pe un GPU specific
+    """
+    try:
+        # Setăm dispozitivul corect pentru acest proces
+        torch.cuda.set_device(gpu_id)
+        logger.info(f"[GPU {gpu_id}] Process started, initializing model...")
+        
+        # Creăm pipeline-ul pentru acest GPU
+        pipe = DiffusionForcingPipeline(
+            model_path,
+            dit_path=model_path,
+            device=torch.device(f"cuda:{gpu_id}"),
+            weight_dtype=torch.bfloat16,
+            offload=params.get("offload", False),
+            use_usp=False,  # Dezactivăm USP pentru procesarea pe un singur GPU
+        )
+        
+        # Configurăm causal attention dacă e necesar
+        if params.get("causal_attention", False):
+            causal_block_size = params.get("causal_block_size", 1)
+            logger.info(f"[GPU {gpu_id}] Setting causal attention with block size {causal_block_size}")
+            pipe.transformer.set_ar_attention(causal_block_size)
+
+        # Configurăm TEACache dacă e necesar
+        if params.get("teacache", False):
+            logger.info(f"[GPU {gpu_id}] Initializing TEACache...")
+            pipe.transformer.initialize_teacache(
+                enable_teacache=True,
+                num_steps=params.get("num_inference_steps", 30),
+                teacache_thresh=params.get("teacache_thresh", 0.2),
+                use_ret_steps=params.get("use_ret_steps", False),
+                ckpt_dir=model_path,
+            )
+        
+        # Calculăm intervalul de cadre pentru acest GPU
+        start_frame = params.get("gpu_start_frames", {}).get(str(gpu_id), 0)
+        end_frame = params.get("gpu_end_frames", {}).get(str(gpu_id), params.get("num_frames", 97))
+        frames_to_process = end_frame - start_frame
+        
+        logger.info(f"[GPU {gpu_id}] Processing frames {start_frame} to {end_frame-1} (total: {frames_to_process} frames)")
+        
+        # Adaptăm parametrii pentru acest chunk
+        local_params = params.copy()
+        local_params["num_frames"] = frames_to_process
+        
+        # Configurăm generatorul cu seed-ul corect
+        local_params["generator"] = torch.Generator(device=f"cuda:{gpu_id}").manual_seed(params.get("seed", 0))
+        
+        # Generăm cadrele
+        logger.info(f"[GPU {gpu_id}] Starting generation...")
+        with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
+            video_frames = pipe(**local_params)[0]
+        
+        logger.info(f"[GPU {gpu_id}] Generated {len(video_frames)} frames successfully")
+        
+        # Punem rezultatele în coadă, inclusiv informațiile de ordonare
+        result_queue.put({
+            "gpu_id": gpu_id,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "frames": video_frames
+        })
+        
+        # Eliberăm memoria
+        del pipe
+        gc.collect()
+        torch.cuda.empty_cache()
+        
+        logger.info(f"[GPU {gpu_id}] Process completed successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"[GPU {gpu_id}] Error in processing: {str(e)}")
+        # Punem eroarea în coadă pentru a o gestiona în procesul principal
+        result_queue.put({
+            "gpu_id": gpu_id,
+            "error": str(e)
+        })
+        return False
+
+def generate_multi_gpu_threading(model_path, params, gpu_ids):
+    """
+    Generează un video folosind mai multe GPU-uri cu threads în loc de procese separate
+    """
+    # Calculăm câte cadre va procesa fiecare GPU
+    num_gpus = len(gpu_ids)
+    total_frames = params.get("num_frames", 97)
+    frames_per_gpu = total_frames // num_gpus
+    remainder = total_frames % num_gpus
+    
+    # Distribuim cadrele către GPU-uri
+    gpu_start_frames = {}
+    gpu_end_frames = {}
+    
+    start_frame = 0
+    for i, gpu_id in enumerate(gpu_ids):
+        # Adăugăm un cadru în plus la primele 'remainder' GPU-uri
+        extra_frame = 1 if i < remainder else 0
+        frames_for_this_gpu = frames_per_gpu + extra_frame
+        
+        gpu_start_frames[str(gpu_id)] = start_frame
+        gpu_end_frames[str(gpu_id)] = start_frame + frames_for_this_gpu
+        
+        start_frame += frames_for_this_gpu
+    
+    # Adăugăm informațiile de distribuție la parametri
+    params_copy = params.copy()  # Creăm o copie pentru a nu modifica originalul
+    params_copy["gpu_start_frames"] = gpu_start_frames
+    params_copy["gpu_end_frames"] = gpu_end_frames
+    
+    logger.info(f"Frame distribution across GPUs: {json.dumps(gpu_start_frames)} to {json.dumps(gpu_end_frames)}")
+    
+    # Creăm o coadă pentru rezultate
+    result_queue = multiprocessing.Queue()
+    
+    # Create processes for each GPU
+    processes = []
+    for gpu_id in gpu_ids:
+        p = multiprocessing.Process(
+            target=process_chunk,
+            args=(gpu_id, model_path, params_copy, result_queue)
+        )
+        processes.append(p)
+        p.start()
+        logger.info(f"Started process for GPU {gpu_id}")
+    
+    # Așteptăm și colectăm rezultatele
+    results = []
+    for _ in range(len(gpu_ids)):
+        result = result_queue.get()
+        if "error" in result:
+            logger.error(f"Error in GPU {result['gpu_id']}: {result['error']}")
+        else:
+            results.append(result)
+    
+    # Așteptăm ca toate procesele să se termine
+    for p in processes:
+        p.join()
+    
+    # Verificăm dacă avem toate rezultatele
+    if len(results) < len(gpu_ids):
+        raise RuntimeError(f"Only {len(results)} out of {len(gpu_ids)} GPUs completed successfully")
+    
+    # Sortăm rezultatele după start_frame pentru a reconstitui videoul complet
+    results.sort(key=lambda x: x["start_frame"])
+    
+    # Combinăm cadrele din toate chunk-urile
+    all_frames = []
+    for result in results:
+        all_frames.extend(result["frames"])
+    
+    logger.info(f"Successfully combined {len(all_frames)} frames from {len(results)} GPUs")
+    
+    return all_frames
 
 if __name__ == "__main__":
     logger.info("SkyReels-V2 Diffusion Forcing Video Generator - Starting")
@@ -91,7 +257,6 @@ if __name__ == "__main__":
     args.model_id = download_model(args.model_id)
     logger.info(f"Model loaded: {args.model_id}")
 
-    assert (args.use_usp and args.seed is not None) or (not args.use_usp), "usp mode need seed"
     if args.seed is None:
         random.seed(time.time())
         args.seed = int(random.randrange(4294967294))
@@ -150,74 +315,32 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
     logger.info(f"Output directory: {save_dir}")
     
-    local_rank = 0
-    if args.use_usp:
-        logger.info("Initializing USP mode for multi-GPU processing")
-        assert (
-            not args.prompt_enhancer
-        ), "`--prompt_enhancer` is not allowed if using `--use_usp`. We recommend running the skyreels_v2_infer/pipelines/prompt_enhancer.py script first to generate enhanced prompt before enabling the `--use_usp` parameter."
-        from xfuser.core.distributed import initialize_model_parallel, init_distributed_environment
-        import torch.distributed as dist
-
-        # Procesăm lista de GPU IDs
-        gpu_ids = [int(id.strip()) for id in args.gpu_ids.split(",") if id.strip()]
-        if not gpu_ids:
-            gpu_ids = [0]  # Implicit folosim GPU 0
-        
-        # Setăm variabilele de mediu pentru a restricționa dispozitivele CUDA vizibile
-        os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
-        logger.info(f"Setting CUDA_VISIBLE_DEVICES={args.gpu_ids}")
-        
-        # Afișăm informații despre fiecare GPU specificat
-        total_memory = 0
-        free_memory = 0
-        logger.info(f"Checking memory for GPUs: {args.gpu_ids}")
-        
-        # Verificăm numărul de GPU-uri vizibile acum
-        num_gpus = torch.cuda.device_count()
-        logger.info(f"Number of visible GPUs: {num_gpus}")
-        
-        for device_idx in range(num_gpus):
-            try:
-                # Selectăm explicit dispozitivul curent
-                torch.cuda.set_device(device_idx)
-                free_mem, total_mem = torch.cuda.mem_get_info()
-                logger.info(f"GPU {device_idx}: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
-                
-                # Calculăm totalul
-                total_memory += total_mem
-                free_memory += free_mem
-            except Exception as e:
-                logger.error(f"Error checking GPU {device_idx}: {e}")
-        
-        logger.info(f"Combined GPU memory: {free_memory/1024**3:.2f}GB free out of {total_memory/1024**3:.2f}GB total")
-
-        # Setăm variabilele de mediu necesare pentru inițializarea distribuită
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12355"
-        os.environ["RANK"] = "0"
-        os.environ["WORLD_SIZE"] = str(len(gpu_ids))
-
-        # Inițializăm procesul de grup pentru procesare distribuită
-        dist.init_process_group(
-            backend="nccl",
-            init_method="env://",
-            world_size=len(gpu_ids),
-            rank=0
-        )
-        local_rank = 0  # Pentru simplitate, când rulăm pe un singur nod, rangul este întotdeauna 0
-        torch.cuda.set_device(local_rank)
-        device = "cuda"
-
-        init_distributed_environment(rank=dist.get_rank(), world_size=dist.get_world_size())
-
-        initialize_model_parallel(
-            sequence_parallel_degree=dist.get_world_size(),
-            ring_degree=1,
-            ulysses_degree=dist.get_world_size(),
-        )
-        logger.info(f"USP initialized with rank {local_rank}, world_size {dist.get_world_size()}, using GPUs: {args.gpu_ids}")
-
+    # Parsăm lista de GPU-uri pentru procesarea multi-GPU
+    gpu_ids = [int(id.strip()) for id in args.gpu_ids.split(",") if id.strip()]
+    if not gpu_ids:
+        gpu_ids = [0]
+    
+    # Verificăm dispozitivele CUDA disponibile
+    num_available_gpus = torch.cuda.device_count()
+    logger.info(f"Number of available GPUs: {num_available_gpus}")
+    
+    if num_available_gpus < len(gpu_ids):
+        logger.warning(f"Requested {len(gpu_ids)} GPUs, but only {num_available_gpus} are available")
+        gpu_ids = gpu_ids[:num_available_gpus]
+    
+    logger.info(f"Using GPUs: {gpu_ids}")
+    
+    # Inițializăm explicit fiecare GPU pentru a ne asigura că sunt disponibile
+    for gpu_id in gpu_ids:
+        try:
+            with torch.cuda.device(gpu_id):
+                torch.tensor([1.0], device=f"cuda:{gpu_id}")
+                free_mem, total_mem = torch.cuda.mem_get_info(gpu_id)
+                logger.info(f"GPU {gpu_id}: {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
+        except Exception as e:
+            logger.error(f"Error initializing GPU {gpu_id}: {str(e)}")
+            raise RuntimeError(f"Failed to initialize GPU {gpu_id}")
+    
     prompt_input = args.prompt
     if args.prompt_enhancer and args.image is None:
         logger.info("Initializing and applying prompt enhancer...")
@@ -228,68 +351,88 @@ if __name__ == "__main__":
         gc.collect()
         torch.cuda.empty_cache()
 
-    # GPU memory before loading the model
-    if torch.cuda.device_count() > 0:
-        free_mem, total_mem = torch.cuda.mem_get_info()
-        logger.info(f"VRAM before loading model (primary GPU): {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
-
-    logger.info("Initializing Diffusion Forcing Pipeline...")
-    pipe = DiffusionForcingPipeline(
-        args.model_id,
-        dit_path=args.model_id,
-        device=torch.device("cuda"),
-        weight_dtype=torch.bfloat16,
-        use_usp=args.use_usp,
-        offload=args.offload,
-    )
-    logger.info("Diffusion Forcing Pipeline initialized successfully")
-
-    if args.causal_attention:
-        logger.info(f"Setting causal attention with block size {args.causal_block_size}")
-        pipe.transformer.set_ar_attention(args.causal_block_size)
-
-    if args.teacache:
-        if args.ar_step > 0:
-            num_steps = (
-                args.inference_steps
-                + (((args.base_num_frames - 1) // 4 + 1) // args.causal_block_size - 1) * args.ar_step
-            )
-            logger.info(f"Asynchronous mode: Total inference steps calculated as {num_steps}")
-        else:
-            num_steps = args.inference_steps
-            logger.info(f"Synchronous mode: Using {num_steps} inference steps")
-        
-        logger.info("Initializing TEACache for accelerated inference...")
-        pipe.transformer.initialize_teacache(
-            enable_teacache=True,
-            num_steps=num_steps,
-            teacache_thresh=args.teacache_thresh,
-            use_ret_steps=args.use_ret_steps,
-            ckpt_dir=args.model_id,
-        )
-        logger.info(f"TEACache initialized with threshold={args.teacache_thresh}, use_ret_steps={args.use_ret_steps}")
-
-    # GPU memory after loading the model
-    if torch.cuda.device_count() > 0:
-        free_mem, total_mem = torch.cuda.mem_get_info()
-        logger.info(f"VRAM after loading model (primary GPU): {free_mem/1024**3:.2f}GB free out of {total_mem/1024**3:.2f}GB total")
-
-    logger.info(f"Prompt: {prompt_input}")
-    logger.info(f"Inference parameters: guidance_scale={guidance_scale}, shift={shift}")
-
-    logger.info(f"Starting video generation with {num_frames} frames...")
+    # Pregătim parametrii pentru generare
+    generation_params = {
+        "prompt": prompt_input,
+        "negative_prompt": negative_prompt,
+        "image": image,
+        "height": height,
+        "width": width,
+        "num_frames": num_frames,
+        "num_inference_steps": args.inference_steps,
+        "shift": shift,
+        "guidance_scale": guidance_scale,
+        "generator": None,  # Vom seta generatorul separat în fiecare proces
+        "overlap_history": args.overlap_history,
+        "addnoise_condition": args.addnoise_condition,
+        "base_num_frames": args.base_num_frames,
+        "ar_step": args.ar_step,
+        "causal_block_size": args.causal_block_size,
+        "fps": fps,
+        "seed": args.seed,
+        "offload": args.offload,
+        "teacache": args.teacache,
+        "teacache_thresh": args.teacache_thresh,
+        "use_ret_steps": args.use_ret_steps,
+        "causal_attention": args.causal_attention
+    }
+    
+    logger.info(f"Starting video generation with {num_frames} frames across {len(gpu_ids)} GPUs...")
     generation_start = time.time()
     
-    with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
-        # Asynchronous inference (ar_step > 0) will have multiple stages of generation
-        if args.ar_step > 0:
-            logger.info(f"Using asynchronous generation with ar_step={args.ar_step}, causal_block_size={args.causal_block_size}")
-            logger.info("Asynchronous generation may take significantly longer than synchronous mode")
-        else:
-            logger.info("Using synchronous generation mode")
+    # Utilizăm multiple GPU-uri
+    if len(gpu_ids) > 1:
+        logger.info(f"Using custom multi-GPU approach with {len(gpu_ids)} GPUs")
+        try:
+            video_frames = generate_multi_gpu_threading(args.model_id, generation_params, gpu_ids)
+        except Exception as e:
+            logger.error(f"Multi-GPU processing failed: {str(e)}")
+            logger.warning("Falling back to single GPU mode")
+            gpu_ids = [gpu_ids[0]]  # Folosim doar primul GPU
+    
+    # Dacă avem doar un GPU sau multi-GPU a eșuat
+    if len(gpu_ids) == 1:
+        # Utilizăm un singur GPU
+        logger.info(f"Using single GPU mode on GPU {gpu_ids[0]}")
+        # Setăm GPU-ul corect
+        torch.cuda.set_device(gpu_ids[0])
         
-        # Build generation parameters without callback
-        generation_params = {
+        # Creăm pipeline-ul pentru acest GPU
+        pipe = DiffusionForcingPipeline(
+            args.model_id,
+            dit_path=args.model_id,
+            device=torch.device(f"cuda:{gpu_ids[0]}"),
+            weight_dtype=torch.bfloat16,
+            use_usp=args.use_usp,
+            offload=args.offload,
+        )
+        
+        if args.causal_attention:
+            logger.info(f"Setting causal attention with block size {args.causal_block_size}")
+            pipe.transformer.set_ar_attention(args.causal_block_size)
+
+        if args.teacache:
+            if args.ar_step > 0:
+                num_steps = (
+                    args.inference_steps
+                    + (((args.base_num_frames - 1) // 4 + 1) // args.causal_block_size - 1) * args.ar_step
+                )
+                logger.info(f"Asynchronous mode: Total inference steps calculated as {num_steps}")
+            else:
+                num_steps = args.inference_steps
+                logger.info(f"Synchronous mode: Using {num_steps} inference steps")
+            
+            logger.info("Initializing TEACache for accelerated inference...")
+            pipe.transformer.initialize_teacache(
+                enable_teacache=True,
+                num_steps=num_steps,
+                teacache_thresh=args.teacache_thresh,
+                use_ret_steps=args.use_ret_steps,
+                ckpt_dir=args.model_id,
+            )
+        
+        # Pregătim parametrii pentru generare
+        single_gpu_params = {
             "prompt": prompt_input,
             "negative_prompt": negative_prompt,
             "image": image,
@@ -308,48 +451,24 @@ if __name__ == "__main__":
             "fps": fps,
         }
         
-        logger.info("Starting generation process... This may take several minutes.")
-        
-        # Check if DiffusionForcingPipeline supports callbacks
-        import inspect
-        if 'callback' in inspect.signature(pipe.__call__).parameters:
-            logger.info("Pipeline supports callbacks, enabling progress reporting")
-            def callback_fn(step, timestep, latents):
-                percent_complete = step / args.inference_steps * 100
-                logger.info(f"Generation progress: Step {step}/{args.inference_steps} ({percent_complete:.1f}%)")
-                return None
-            
-            generation_params["callback"] = callback_fn
-            generation_params["callback_steps"] = max(args.inference_steps // 10, 1)
-        else:
-            logger.info("Pipeline doesn't support callbacks, progress updates will not be shown")
-        
-        try:
-            video_frames = pipe(**generation_params)[0]
-        except TypeError as e:
-            if "got an unexpected keyword argument 'callback'" in str(e):
-                logger.info("Callback not supported, retrying without callback parameters")
-                # Remove callback parameters if they exist
-                if "callback" in generation_params:
-                    del generation_params["callback"]
-                if "callback_steps" in generation_params:
-                    del generation_params["callback_steps"]
-                video_frames = pipe(**generation_params)[0]
-            else:
+        with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
+            try:
+                video_frames = pipe(**single_gpu_params)[0]
+            except Exception as e:
+                logger.error(f"Error in single GPU mode: {str(e)}")
                 raise
     
     generation_time = time.time() - generation_start
     logger.info(f"Video generation completed in {generation_time:.2f} seconds")
 
-    if local_rank == 0:
-        logger.info("Saving result video...")
-        current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
-        video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{current_time}.mp4"
-        output_path = os.path.join(save_dir, video_out_file)
-        
-        logger.info(f"Writing video with {len(video_frames)} frames at {fps} FPS...")
-        imageio.mimwrite(output_path, video_frames, fps=fps, quality=8, output_params=["-loglevel", "error"])
-        logger.info(f"Video saved at: {output_path}")
+    logger.info("Saving result video...")
+    current_time = time.strftime("%Y-%m-%d_%H-%M-%S", time.localtime())
+    video_out_file = f"{args.prompt[:100].replace('/','')}_{args.seed}_{current_time}.mp4"
+    output_path = os.path.join(save_dir, video_out_file)
+    
+    logger.info(f"Writing video with {len(video_frames)} frames at {fps} FPS...")
+    imageio.mimwrite(output_path, video_frames, fps=fps, quality=8, output_params=["-loglevel", "error"])
+    logger.info(f"Video saved at: {output_path}")
     
     total_time = time.time() - start_time
     logger.info(f"Complete process took {total_time:.2f} seconds")
