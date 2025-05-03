@@ -5,12 +5,10 @@ import random
 import time
 import logging
 import multiprocessing
-import threading
-import queue
 import json
+from typing import Dict, List
 
 import imageio
-import numpy as np
 import torch
 from diffusers.utils import load_image
 
@@ -29,7 +27,7 @@ logger = logging.getLogger(__name__)
 # This is critical for CUDA + multiprocessing
 multiprocessing.set_start_method('spawn', force=True)
 
-def process_chunk(gpu_id, model_path, params, result_queue):
+def process_chunk(gpu_id: int, model_path: str, params: Dict, result_queue):
     """
     Procesează un chunk de cadre pe un GPU specific
     """
@@ -73,15 +71,33 @@ def process_chunk(gpu_id, model_path, params, result_queue):
         logger.info(f"[GPU {gpu_id}] Processing frames {start_frame} to {end_frame-1} (total: {frames_to_process} frames)")
         
         # Adaptăm parametrii pentru acest chunk
-        local_params = params.copy()
-        local_params["num_frames"] = frames_to_process
+        local_params = {
+            "prompt": params.get("prompt", ""),
+            "negative_prompt": params.get("negative_prompt", ""),
+            "image": params.get("image", None),
+            "height": params.get("height", 544),
+            "width": params.get("width", 960),
+            "num_frames": frames_to_process,
+            "num_inference_steps": params.get("num_inference_steps", 30),
+            "shift": params.get("shift", 8.0),
+            "guidance_scale": params.get("guidance_scale", 6.0),
+            "generator": torch.Generator(device=f"cuda:{gpu_id}").manual_seed(params.get("seed", 0)),
+            "overlap_history": params.get("overlap_history", None),
+            "addnoise_condition": params.get("addnoise_condition", 0),
+            "base_num_frames": params.get("base_num_frames", frames_to_process),
+            "ar_step": params.get("ar_step", 0),
+            "causal_block_size": params.get("causal_block_size", 1),
+            "fps": params.get("fps", 24),
+        }
         
-        # Configurăm generatorul cu seed-ul corect
-        local_params["generator"] = torch.Generator(device=f"cuda:{gpu_id}").manual_seed(params.get("seed", 0))
+        # IMPORTANT: Eliminăm parametrul 'seed' din local_params
+        # Seed-ul a fost deja aplicat la generator
+        if "seed" in local_params:
+            del local_params["seed"]
         
         # Generăm cadrele
         logger.info(f"[GPU {gpu_id}] Starting generation...")
-        with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
+        with torch.amp.autocast('cuda', dtype=pipe.transformer.dtype), torch.no_grad():
             video_frames = pipe(**local_params)[0]
         
         logger.info(f"[GPU {gpu_id}] Generated {len(video_frames)} frames successfully")
@@ -111,7 +127,7 @@ def process_chunk(gpu_id, model_path, params, result_queue):
         })
         return False
 
-def generate_multi_gpu_threading(model_path, params, gpu_ids):
+def generate_multi_gpu_threading(model_path: str, params: Dict, gpu_ids: List[int]):
     """
     Generează un video folosind mai multe GPU-uri cu threads în loc de procese separate
     """
@@ -362,14 +378,13 @@ if __name__ == "__main__":
         "num_inference_steps": args.inference_steps,
         "shift": shift,
         "guidance_scale": guidance_scale,
-        "generator": None,  # Vom seta generatorul separat în fiecare proces
+        "seed": args.seed,  # Transmitem seed-ul, acesta va fi folosit doar pentru inițializarea generator-ului
         "overlap_history": args.overlap_history,
         "addnoise_condition": args.addnoise_condition,
         "base_num_frames": args.base_num_frames,
         "ar_step": args.ar_step,
         "causal_block_size": args.causal_block_size,
         "fps": fps,
-        "seed": args.seed,
         "offload": args.offload,
         "teacache": args.teacache,
         "teacache_thresh": args.teacache_thresh,
@@ -451,7 +466,10 @@ if __name__ == "__main__":
             "fps": fps,
         }
         
-        with torch.cuda.amp.autocast(dtype=pipe.transformer.dtype), torch.no_grad():
+        # IMPORTANT: Nu includem seed-ul direct în parametri
+        # În schimb, îl folosim la inițializarea generator-ului
+        
+        with torch.amp.autocast('cuda', dtype=pipe.transformer.dtype), torch.no_grad():
             try:
                 video_frames = pipe(**single_gpu_params)[0]
             except Exception as e:
